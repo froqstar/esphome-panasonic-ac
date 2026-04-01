@@ -245,7 +245,7 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
     ESP_LOGV(TAG, "Requested target temp change to %.2f", desired);
 
     this->target_temperature = desired;  // Display user's desired temp
-    update_internal_setpoint();
+    this->update_internal_setpoint();
   }
 
   if (call.has_custom_fan_mode()) {

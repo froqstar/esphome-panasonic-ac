@@ -243,33 +243,37 @@ void PanasonicAC::set_room_sensor(sensor::Sensor *room_sensor) {
 
 void PanasonicAC::update_internal_setpoint() {
   float previous_setpoint = this->internal_setpoint_;
-  // If room sensor not configured or no valid values, use target_temperature directly
+  float new_setpoint = previous_setpoint;
+  // If room sensor not configured or no valid values, use target_temperature as setpoint
   if (this->room_sensor_ == nullptr ||
       std::isnan(this->room_temperature_) ||
       std::isnan(this->current_temperature) ||
       std::isnan(this->internal_setpoint_)) {
-    this->internal_setpoint_ = this->target_temperature - this->current_temperature_offset_;
+    new_setpoint = this->target_temperature;
   } else {
-    // Formula: new_setpoint = internal_temp + (target_temp - room_temp)
-    float new_setpoint = this->current_temperature +
-                            (this->target_temperature - this->room_temperature_);
-
-    // Apply offset
-    new_setpoint -= this->current_temperature_offset_;
-
-    // Clamp to valid range
-    new_setpoint = std::max((float)MIN_TEMPERATURE, std::min((float)MAX_TEMPERATURE, new_setpoint));
-
-    ESP_LOGD(TAG, "Internal setpoint calculated: target=%.1f, room=%.1f, reported=%.1f, offset=%.1f, setpoint=%.1f",
-            this->target_temperature, 
-            this->room_temperature_,
-            this->current_temperature, 
-            this->current_temperature_offset_,
-            new_setpoint);
-
-    this->internal_setpoint_ = new_setpoint;
+    // Else use formula
+    // new_setpoint = internal_temp + (target_temp - room_temp)
+    // to drive AC in right direction regardless of what its internal temperature sensor reports.
+    // Inspired by how HMS networks Intesis products implement external temperature sensors, 
+    // see https://github.com/DomiStyle/esphome-panasonic-ac/issues/97#issuecomment-3724612289.
+    new_setpoint = this->current_temperature + (this->target_temperature - this->room_temperature_);
   }
-  if (this->internal_setpoint_ != previous_setpoint) {
+
+  // Apply offset
+  new_setpoint -= this->current_temperature_offset_;
+
+  // Clamp to valid range
+  new_setpoint = std::max((float)MIN_TEMPERATURE, std::min((float)MAX_TEMPERATURE, new_setpoint));
+
+  ESP_LOGD(TAG, "Internal setpoint calculated: target=%.1f, room=%.1f, reported=%.1f, offset=%.1f, resulting setpoint=%.1f",
+          this->target_temperature, 
+          this->room_temperature_,
+          this->current_temperature, 
+          this->current_temperature_offset_,
+          new_setpoint);
+  
+  if (new_setpoint != previous_setpoint) {
+    this->internal_setpoint_ = new_setpoint;
     this->send_setpoint_to_ac(this->internal_setpoint_);
   }
 }
