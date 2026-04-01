@@ -241,8 +241,21 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
   }
 
   if (call.get_target_temperature().has_value()) {
-    ESP_LOGV(TAG, "Requested target temp change to %.2f, %.2f including offset", *call.get_target_temperature(), *call.get_target_temperature() - this->current_temperature_offset_);
-    this->cmd[1] = (*call.get_target_temperature() - this->current_temperature_offset_) / TEMPERATURE_STEP;
+    float desired = *call.get_target_temperature();
+    ESP_LOGV(TAG, "Requested target temp change to %.2f", desired);
+
+    if (this->room_sensor_ != nullptr) {
+      // Store desired setpoint and calculate adjusted value
+      this->desired_setpoint_ = desired;
+      this->target_temperature = desired;  // Display user's desired temp
+      float internal_setpoint = this->calculate_internal_setpoint();
+      ESP_LOGV(TAG, "Calculated internal setpoint: %.2f", internal_setpoint);
+      this->cmd[1] = (internal_setpoint - this->current_temperature_offset_) / TEMPERATURE_STEP;
+    } else {
+      // Original behavior
+      ESP_LOGV(TAG, "Target temp including offset: %.2f", desired - this->current_temperature_offset_);
+      this->cmd[1] = (desired - this->current_temperature_offset_) / TEMPERATURE_STEP;
+    }
   }
 
   if (call.has_custom_fan_mode()) {
@@ -486,6 +499,20 @@ void PanasonicACCNT::handle_packet() {
 /*
  * Sensor handling
  */
+
+void PanasonicACCNT::send_setpoint_to_ac(float setpoint) {
+  if (this->state_ != ACState::Ready)
+    return;
+
+  ESP_LOGV(TAG, "Sending adjusted setpoint to AC: %.1f", setpoint);
+
+  if (this->cmd.empty()) {
+    this->cmd = this->data;
+  }
+
+  this->cmd[1] = (setpoint - this->current_temperature_offset_) / TEMPERATURE_STEP;
+  // Command will be sent in handle_cmd()
+}
 
 void PanasonicACCNT::on_vertical_swing_change(const StringRef &swing) {
   if (this->state_ != ACState::Ready)

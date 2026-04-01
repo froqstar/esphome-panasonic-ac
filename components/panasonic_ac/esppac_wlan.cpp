@@ -103,8 +103,21 @@ void PanasonicACWLAN::control(const climate::ClimateCall &call) {
   }
 
   if (call.get_target_temperature().has_value()) {
-    ESP_LOGV(TAG, "Requested target temp change to %.2f, %.2f including offset", *call.get_target_temperature(), *call.get_target_temperature() - this->current_temperature_offset_);
-    set_value(0x31, (*call.get_target_temperature() - this->current_temperature_offset_) * 2);
+    float desired = *call.get_target_temperature();
+    ESP_LOGV(TAG, "Requested target temp change to %.2f", desired);
+
+    if (this->room_sensor_ != nullptr) {
+      // Store desired setpoint and calculate adjusted value
+      this->desired_setpoint_ = desired;
+      this->target_temperature = desired;  // Display user's desired temp
+      float internal_setpoint = this->calculate_internal_setpoint();
+      ESP_LOGV(TAG, "Calculated internal setpoint: %.2f", internal_setpoint);
+      set_value(0x31, (internal_setpoint - this->current_temperature_offset_) * 2);
+    } else {
+      // Original behavior
+      ESP_LOGV(TAG, "Target temp including offset: %.2f", desired - this->current_temperature_offset_);
+      set_value(0x31, (desired - this->current_temperature_offset_) * 2);
+    }
   }
 
   if (call.has_custom_fan_mode()) {
@@ -740,6 +753,16 @@ void PanasonicACWLAN::set_value(uint8_t key, uint8_t value) {
 /*
  * Sensor handling
  */
+
+void PanasonicACWLAN::send_setpoint_to_ac(float setpoint) {
+  if (this->state_ != ACState::Ready)
+    return;
+
+  ESP_LOGV(TAG, "Sending adjusted setpoint to AC: %.1f", setpoint);
+
+  set_value(0x31, (setpoint - this->current_temperature_offset_) * 2);
+  send_set_command();
+}
 
 void PanasonicACWLAN::on_vertical_swing_change(const StringRef& swing) {
   if (this->state_ != ACState::Ready)

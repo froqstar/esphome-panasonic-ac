@@ -40,6 +40,7 @@ CONF_ECO_SWITCH = "eco_switch"
 CONF_ECONAVI_SWITCH = "econavi_switch"
 CONF_MILD_DRY_SWITCH = "mild_dry_switch"
 CONF_CURRENT_POWER_CONSUMPTION = "current_power_consumption"
+CONF_ROOM_SENSOR = "room_sensor"
 CONF_WLAN = "wlan"
 CONF_CNT = "cnt"
 
@@ -62,6 +63,7 @@ PANASONIC_COMMON_SCHEMA = {
     ),
     cv.Optional(CONF_NANOEX_SWITCH): SWITCH_SCHEMA,
     cv.Optional(CONF_OUTSIDE_TEMPERATURE_OFFSET): cv.int_range(min=-15, max=15),
+    cv.Optional(CONF_ROOM_SENSOR): cv.use_id(sensor.Sensor),
 }
 
 PANASONIC_CNT_SCHEMA = {
@@ -109,6 +111,10 @@ async def to_code(config):
 
     if CONF_OUTSIDE_TEMPERATURE_OFFSET in config:
         cg.add(var.set_outside_temperature_offset(config[CONF_OUTSIDE_TEMPERATURE_OFFSET]))
+
+    if CONF_ROOM_SENSOR in config:
+        sens = await cg.get_variable(config[CONF_ROOM_SENSOR])
+        cg.add(var.set_room_sensor(sens))
 
     for s in [CONF_ECO_SWITCH, CONF_NANOEX_SWITCH, CONF_MILD_DRY_SWITCH, CONF_ECONAVI_SWITCH]:
         if s in config:

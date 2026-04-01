@@ -90,6 +90,35 @@ Examples:
 - If the temperature is actually lower than measured by the AC, set the difference as a negative offset.
   - E.g. actual temperature = 20°, AC measured temperature = 22° --> offset = -2°
 
+## Using an external room temperature sensor
+
+If you have a more accurate temperature sensor in your room (e.g., a separate Home Assistant sensor), you can configure the AC to use it for more precise temperature control. This is useful when the AC's internal sensor doesn't accurately reflect the actual room temperature due to its placement.
+
+```yaml
+sensor:
+  - platform: homeassistant
+    id: room_temp_sensor
+    entity_id: sensor.living_room_temperature
+
+climate:
+  - platform: panasonic_ac
+    type: cnt  # or wlan
+    name: Panasonic AC
+    room_sensor: room_temp_sensor
+    # ... other configuration
+```
+
+When a room sensor is configured:
+
+- Home Assistant displays your desired setpoint (the temperature you actually want in the room)
+- The component automatically calculates and sends an adjusted internal setpoint to the AC using the formula:
+  `internal_setpoint = internal_temperature + (desired_setpoint - room_temperature)`
+- The setpoint is automatically recalculated whenever the room sensor, AC internal temperature, or your desired setpoint changes
+
+**Example:** If your room sensor reads 22°C, you set the target to 24°C, and the AC's internal sensor reads 26°C, the component will send 28°C to the AC (26 + (24 - 22) = 28). This compensates for the difference between the AC's internal reading and the actual room temperature.
+
+**Note:** The room sensor feature works independently of the temperature offset settings. If you use both, the offset is applied to the displayed temperature values, while the room sensor affects the actual setpoint sent to the AC.
+
 # Hardware installation
 
 [Hardware installation for DNSK-P11](README.DNSKP11.md)

@@ -27,6 +27,7 @@ class PanasonicACCNT : public PanasonicAC {
   void on_eco_change(bool eco) override;
   void on_econavi_change(bool eco) override;
   void on_mild_dry_change(bool mild_dry) override;
+  void send_setpoint_to_ac(float setpoint) override;
 
   void setup() override;
   void loop() override;

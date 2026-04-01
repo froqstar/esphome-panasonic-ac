@@ -44,6 +44,7 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
 
   void set_current_temperature_sensor(sensor::Sensor *current_temperature_sensor);
   void set_current_temperature_offset(int8_t current_temperature_offset);
+  void set_room_sensor(sensor::Sensor *room_sensor);
 
   void setup() override;
   void loop() override;
@@ -68,6 +69,11 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   bool eco_state_ = false;       // Stores the state of eco to prevent duplicate packets
   bool econavi_state_ = false;       // Stores the state of econavi to prevent duplicate packets
   bool mild_dry_state_ = false;  // Stores the state of mild dry to prevent duplicate packets
+
+  sensor::Sensor *room_sensor_ = nullptr;        // External room temperature sensor
+  float room_temperature_ = NAN;                 // Last known room temperature
+  float desired_setpoint_ = NAN;                 // User's desired setpoint (for recalculation)
+  bool desired_setpoint_initialized_ = false;    // Track if we've initialized from AC
 
   bool waiting_for_response_ = false;  // Set to true if we are waiting for a response
 
@@ -96,12 +102,16 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   void update_mild_dry(bool mild_dry);
   void update_current_power_consumption(int16_t power);
 
+  float calculate_internal_setpoint();
+  void recalculate_setpoint_on_sensor_update();
+
   virtual void on_horizontal_swing_change(const StringRef &swing) = 0;
   virtual void on_vertical_swing_change(const StringRef &swing) = 0;
   virtual void on_nanoex_change(bool nanoex) = 0;
   virtual void on_eco_change(bool eco) = 0;
   virtual void on_econavi_change(bool econavi) = 0;
   virtual void on_mild_dry_change(bool mild_dry) = 0;
+  virtual void send_setpoint_to_ac(float setpoint) = 0;
 
   climate::ClimateAction determine_action();
 
