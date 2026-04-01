@@ -90,10 +90,8 @@ void PanasonicAC::update_current_temperature(int8_t temperature) {
   this->current_temperature = temperature;
   ESP_LOGV(TAG, "Current temperature incl. offset: %d", temperature);
 
-  // Recalculate setpoint if room sensor is active
-  if (this->room_sensor_ != nullptr && !std::isnan(this->desired_setpoint_)) {
-    this->recalculate_setpoint_on_sensor_update();
-  }
+  // Update internal setpoint if room sensor is active
+  update_internal_setpoint();
 }
 
 void PanasonicAC::update_target_temperature(uint8_t raw_value) {
@@ -108,18 +106,18 @@ void PanasonicAC::update_target_temperature(uint8_t raw_value) {
     return;
   }
 
-  // Initialize desired_setpoint from AC on first poll if room sensor is configured
-  if (this->room_sensor_ != nullptr && !this->desired_setpoint_initialized_) {
-    this->desired_setpoint_ = temperature;
-    this->desired_setpoint_initialized_ = true;
-    ESP_LOGD(TAG, "Initialized desired setpoint from AC: %.1f", temperature);
+  // Initialize internal_setpoint from AC on first poll if room sensor is configured
+  if (this->room_sensor_ != nullptr && !this->internal_setpoint_initialized_) {
+    this->internal_setpoint_ = temperature;
+    this->internal_setpoint_initialized_ = true;
+    ESP_LOGD(TAG, "Initialized internal setpoint from AC: %.1f", this->internal_setpoint_);
   }
 
-  // If room sensor is active, keep showing user's desired setpoint
-  if (this->room_sensor_ == nullptr || std::isnan(this->desired_setpoint_)) {
+  // If not using room sensor, update displayed setpoint from AC 
+  if (this->room_sensor_ == nullptr || std::isnan(this->internal_setpoint_)) {
     this->target_temperature = temperature;
   }
-  // else: keep this->target_temperature as the user's desired value
+  // else: keep this->target_temperature as the user's target value
 
   ESP_LOGV(TAG, "Target temperature incl. offset: %.2f", temperature);
 }
@@ -239,42 +237,39 @@ void PanasonicAC::set_room_sensor(sensor::Sensor *room_sensor) {
   this->room_sensor_->add_on_state_callback([this](float state) {
     this->room_temperature_ = state;
     ESP_LOGV(TAG, "Room sensor updated: %.1f", state);
-    // Recalculate and send if we have a valid desired setpoint
-    if (!std::isnan(this->desired_setpoint_)) {
-      this->recalculate_setpoint_on_sensor_update();
-    }
+    update_internal_setpoint();
   });
 }
 
-float PanasonicAC::calculate_internal_setpoint() {
-  // If room sensor not configured or no valid values, return desired setpoint directly
+void PanasonicAC::update_internal_setpoint() {
+  // If room sensor not configured or no valid values, return target_temperature directly
   if (this->room_sensor_ == nullptr ||
       std::isnan(this->room_temperature_) ||
       std::isnan(this->current_temperature) ||
-      std::isnan(this->desired_setpoint_)) {
-    return this->desired_setpoint_;
+      std::isnan(this->internal_setpoint_)) {
+    this->internal_setpoint_ = this->target_temperature - this->current_temperature_offset_;
   }
 
-  // Formula: internal_setpoint = internal_temp + (desired_setpoint - room_temp)
-  float internal_setpoint = this->current_temperature +
-                           (this->desired_setpoint_ - this->room_temperature_);
+  // Formula: new_setpoint = internal_temp + (target_temp - room_temp)
+  float new_setpoint = this->current_temperature +
+                           (this->target_temperature - this->room_temperature_);
+
+  // Apply offset
+  new_setpoint -= this->current_temperature_offset_;
 
   // Clamp to valid range
-  internal_setpoint = std::max((float)MIN_TEMPERATURE,
-                               std::min((float)MAX_TEMPERATURE, internal_setpoint));
+  new_setpoint = std::max((float)MIN_TEMPERATURE,
+                               std::min((float)MAX_TEMPERATURE, new_setpoint));
 
-  ESP_LOGD(TAG, "Room sensor adjustment: desired=%.1f, room=%.1f, internal=%.1f, calculated=%.1f",
-           this->desired_setpoint_, this->room_temperature_,
-           this->current_temperature, internal_setpoint);
+  ESP_LOGD(TAG, "Internal setpoint calculated: target=%.1f, room=%.1f, reported=%.1f, offset=%.1f, setpoint=%.1f",
+           this->target_temperature, 
+           this->room_temperature_,
+           this->current_temperature, 
+           this->current_temperature_offset_,
+           new_setpoint);
 
-  return internal_setpoint;
-}
-
-void PanasonicAC::recalculate_setpoint_on_sensor_update() {
-  float internal_setpoint = calculate_internal_setpoint();
-  if (!std::isnan(internal_setpoint)) {
-    send_setpoint_to_ac(internal_setpoint);
-  }
+  this->internal_setpoint_ = new_setpoint;
+  this->send_setpoint_to_ac(this->internal_setpoint_);
 }
 
 void PanasonicAC::set_vertical_swing_select(select::Select *vertical_swing_select) {

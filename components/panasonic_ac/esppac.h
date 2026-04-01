@@ -11,7 +11,7 @@ namespace esphome {
 
 namespace panasonic_ac {
 
-static const char *const VERSION = "2.5.0";
+static const char *const VERSION = "2.6.0";
 
 static const uint8_t BUFFER_SIZE = 128;  // The maximum size of a single packet (both receive and transmit)
 static const uint8_t READ_TIMEOUT = 20;  // The maximum time to wait before considering a packet complete
@@ -72,8 +72,8 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
 
   sensor::Sensor *room_sensor_ = nullptr;        // External room temperature sensor
   float room_temperature_ = NAN;                 // Last known room temperature
-  float desired_setpoint_ = NAN;                 // User's desired setpoint (for recalculation)
-  bool desired_setpoint_initialized_ = false;    // Track if we've initialized from AC
+  float internal_setpoint_ = NAN;                 // Setpoint sent to the AC
+  bool internal_setpoint_initialized_ = false;    // Track if we've initialized internal setpoint from AC
 
   bool waiting_for_response_ = false;  // Set to true if we are waiting for a response
 
@@ -102,8 +102,7 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   void update_mild_dry(bool mild_dry);
   void update_current_power_consumption(int16_t power);
 
-  float calculate_internal_setpoint();
-  void recalculate_setpoint_on_sensor_update();
+  void update_internal_setpoint();
 
   virtual void on_horizontal_swing_change(const StringRef &swing) = 0;
   virtual void on_vertical_swing_change(const StringRef &swing) = 0;
