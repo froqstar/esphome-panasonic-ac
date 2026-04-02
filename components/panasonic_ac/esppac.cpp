@@ -236,7 +236,7 @@ void PanasonicAC::set_room_sensor(sensor::Sensor *room_sensor) {
   this->room_sensor_ = room_sensor;
   this->room_sensor_->add_on_state_callback([this](float state) {
     this->room_temperature_ = state;
-    ESP_LOGV(TAG, "Room sensor updated: %.1f", state);
+    ESP_LOGD(TAG, "Room sensor updated: %.1f", state);
     update_internal_setpoint();
   });
 }
@@ -256,7 +256,7 @@ void PanasonicAC::update_internal_setpoint() {
     // to drive AC in right direction regardless of what its internal temperature sensor reports.
     // Inspired by how HMS networks Intesis products implement external temperature sensors, 
     // see https://github.com/DomiStyle/esphome-panasonic-ac/issues/97#issuecomment-3724612289.
-    new_setpoint = this->current_temperature + (this->target_temperature - this->room_temperature_);
+    new_setpoint = this->current_temperature + (this->target_temperature - this->room_temperature_) / 2;
   }
 
   // Apply offset
