@@ -236,11 +236,12 @@ float PanasonicAC::compute_wire_setpoint() const {
     // put in b3. Sending (intended - B) lands the effective internal
     // setpoint exactly on the law output.
     // RESOLVED 2026-10-20 (live, kinderzimmer): the unit applies a fixed
-    // extra ~1 degC internally that is NOT reflected in the measured
+    // extra internal boost that is NOT reflected in the measured
     // (b13-b3)/2 - with pure measured-boost cancellation the room settled
-    // exactly 1 degC below desired. Cancel only the boost ABOVE that
-    // baseline (i.e. subtract 1 degree LESS). The internal_boost member and
-    // its sensor keep showing the unit's true measured B.
+    // below desired; live tuning put the baseline at 0.5 degC (was first
+    // measured as ~1). Cancel only the boost ABOVE that baseline. The
+    // internal_boost member and its sensor keep showing the unit's true
+    // measured B.
     if (!std::isnan(this->internal_boost_)) {
       wire -= this->internal_boost_ - BOOST_BASELINE;
       wire = std::floor(wire * 2.0f) / 2.0f;  // B and baseline are on the 0.5 grid -> identity; guards float noise
