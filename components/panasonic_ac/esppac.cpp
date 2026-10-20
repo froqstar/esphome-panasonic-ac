@@ -216,8 +216,9 @@ float PanasonicAC::compute_wire_setpoint() const {
   if (std::isnan(this->desired_setpoint_))
     return NAN;
 
+  bool law_valid = !std::isnan(this->room_temperature_) && !std::isnan(this->intake_temperature_);
   float wire;
-  if (std::isnan(this->room_temperature_) || std::isnan(this->intake_temperature_)) {
+  if (!law_valid) {
     // Fallback = plain-mode / upstream logic. Deliberately NO boost
     // subtraction - the default path must byte-match what a
     // non-compensating setup sends.
@@ -234,16 +235,33 @@ float PanasonicAC::compute_wire_setpoint() const {
     // b13 = b3 + B, so the unit settles intake B degrees above whatever we
     // put in b3. Sending (intended - B) lands the effective internal
     // setpoint exactly on the law output.
-    // NOTE (uncertain, revisit with live data): it is unclear whether the
-    // unit always adds at least 1 degC internally regardless of the
-    // measured (b13 - b3)/2 - if so, we would need to subtract 1 degree
-    // LESS than the measured boost here to avoid over-correcting.
+    // RESOLVED 2026-10-20 (live, kinderzimmer): the unit applies a fixed
+    // extra ~1 degC internally that is NOT reflected in the measured
+    // (b13-b3)/2 - with pure measured-boost cancellation the room settled
+    // exactly 1 degC below desired. Cancel only the boost ABOVE that
+    // baseline (i.e. subtract 1 degree LESS). The internal_boost member and
+    // its sensor keep showing the unit's true measured B.
     if (!std::isnan(this->internal_boost_)) {
-      wire -= this->internal_boost_;
-      wire = std::floor(wire * 2.0f) / 2.0f;  // B is on the 0.5 grid -> identity; guards float noise
+      wire -= this->internal_boost_ - BOOST_BASELINE;
+      wire = std::floor(wire * 2.0f) / 2.0f;  // B and baseline are on the 0.5 grid -> identity; guards float noise
     }
   }
-  return std::min(30.0f, std::max(wire, 16.0f));
+  wire = std::min(30.0f, std::max(wire, 16.0f));
+
+  // Log every calculation with its inputs (desired in display units, room
+  // raw sensor, intake raw packet, boost (b13-b3)/2, wire = actual byte).
+  if (!law_valid) {
+    ESP_LOGD(TAG, "Setpoint calc (fallback, sensors stale): desired=%.1f offset=%d -> wire=%.1f",
+             this->desired_setpoint_, this->current_temperature_offset_, wire);
+  } else if (std::isnan(this->internal_boost_)) {
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f (no cancellation yet)",
+             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_, wire);
+  } else {
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f (cancel %.1f incl baseline) -> wire=%.1f",
+             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_,
+             this->internal_boost_, this->internal_boost_ - BOOST_BASELINE, wire);
+  }
+  return wire;
 }
 
 void PanasonicAC::maybe_restore_desired_setpoint() {
