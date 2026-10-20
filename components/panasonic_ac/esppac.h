@@ -30,7 +30,6 @@ static const uint8_t TEMPERATURE_THRESHOLD =
 
 static const uint32_t GRACE_MS = 6000;      // Grace after our own command masking echoes/stale state (1 poll + slack)
 static const float SETPOINT_EPSILON = 0.25f;  // Echo/adopt tolerance; half a 0.5 step, absorbs only float noise
-static const float BOOST_BASELINE = 0.5f;   // Unit's own always-on internal boost not part of measured B (live-tuned)
 
 enum class CommandType { Normal, Response, Resend };
 

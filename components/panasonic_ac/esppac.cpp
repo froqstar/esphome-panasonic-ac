@@ -233,18 +233,17 @@ float PanasonicAC::compute_wire_setpoint() const {
 
     // Feedforward-cancel the unit's internal boost: the compressor tracks
     // b13 = b3 + B, so the unit settles intake B degrees above whatever we
-    // put in b3. Sending (intended - B) lands the effective internal
-    // setpoint exactly on the law output.
-    // RESOLVED 2026-10-20 (live, kinderzimmer): the unit applies a fixed
-    // extra internal boost that is NOT reflected in the measured
-    // (b13-b3)/2 - with pure measured-boost cancellation the room settled
-    // below desired; live tuning put the baseline at 0.5 degC (was first
-    // measured as ~1). Cancel only the boost ABOVE that baseline. The
-    // internal_boost member and its sensor keep showing the unit's true
-    // measured B.
+    // put in b3.
+    // RESOLVED 2026-10-20 (live, kinderzimmer): the unit's REALIZED boost
+    // deviates from the byte-derived B - pure B cancellation made the room
+    // undershoot. Cancel HALF of B instead: a linear scale analogous to the
+    // (desired - room) / 2 half-step in the main law, rather than a fixed
+    // offset (a constant BOOST_BASELINE=0.5 correction was fitted at B=1.0;
+    // B/2 gives the identical result there while generalizing to other B).
+    // The internal_boost member and its sensor keep showing the true B.
     if (!std::isnan(this->internal_boost_)) {
-      wire -= this->internal_boost_ - BOOST_BASELINE;
-      wire = std::floor(wire * 2.0f) / 2.0f;  // B and baseline are on the 0.5 grid -> identity; guards float noise
+      wire -= this->internal_boost_ / 2.0f;
+      wire = std::floor(wire * 2.0f) / 2.0f;  // B/2 can land off-grid (0.25 steps); floor re-grids for exact write-skip/echo
     }
   }
   wire = std::min(30.0f, std::max(wire, 16.0f));
@@ -258,9 +257,9 @@ float PanasonicAC::compute_wire_setpoint() const {
     ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f (no cancellation yet)",
              this->desired_setpoint_, this->room_temperature_, this->intake_temperature_, wire);
   } else {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f (cancel %.1f incl baseline) -> wire=%.1f",
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f (cancel %.1f = B/2) -> wire=%.1f",
              this->desired_setpoint_, this->room_temperature_, this->intake_temperature_,
-             this->internal_boost_, this->internal_boost_ - BOOST_BASELINE, wire);
+             this->internal_boost_, this->internal_boost_ / 2.0f, wire);
   }
   return wire;
 }
