@@ -290,8 +290,9 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
       this->cmd[3] = 0x60;
     else if (fanMode == "5")
       this->cmd[3] = 0x70;
-    else
+    else {
       ESP_LOGV(TAG, "Unsupported fan mode requested");
+    }
   }
 
   if (call.get_swing_mode().has_value()) {
@@ -327,8 +328,9 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
       this->cmd[5] = (this->cmd[5] & 0xF0) + 0x02;  // Clear right nib and set powerful mode
     else if (preset == "Quiet")
       this->cmd[5] = (this->cmd[5] & 0xF0) + 0x04;  // Clear right nib and set quiet mode
-    else
+    else {
       ESP_LOGV(TAG, "Unsupported preset requested");
+    }
   }
 
   if (this->compensation_active()) {
@@ -366,8 +368,9 @@ void PanasonicACCNT::set_data(bool set) {
         this->update_current_temperature((int8_t) this->rx_buffer_[18]);
       else if (this->rx_buffer_[21] != 0x80)
         this->update_current_temperature((int8_t) this->rx_buffer_[21]);
-      else
+      else {
         ESP_LOGV(TAG, "Current temperature is not supported");
+      }
     } else {
       ESP_LOGV(TAG, "Current temperature is not supported");
     }
@@ -377,8 +380,9 @@ void PanasonicACCNT::set_data(bool set) {
         this->update_outside_temperature((int8_t) this->rx_buffer_[19]);
       else if (this->rx_buffer_[22] != 0x80)
         this->update_outside_temperature((int8_t) this->rx_buffer_[22]);
-      else
+      else {
         ESP_LOGV(TAG, "Outside temperature is not supported");
+      }
     }
 
     if (this->current_power_consumption_sensor_ != nullptr) {

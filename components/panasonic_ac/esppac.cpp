@@ -225,7 +225,11 @@ float PanasonicAC::compute_wire_setpoint() const {
     wire = std::floor((this->desired_setpoint_ - this->current_temperature_offset_) * 2.0f) / 2.0f;
   } else {
     // Intended effective internal setpoint (what byte 13 should end up as):
-    wire = this->intake_temperature_ + (this->desired_setpoint_ - this->room_temperature_) / 2.0f;
+    // Full proportional on the raw error - 2026-10-20: the earlier
+    // (desired - room) / 2 half-step gave the unit too much deadband and
+    // produced over/undershoot; drive it aggressively, the unit's own
+    // hysteresis still damps the response.
+    wire = this->intake_temperature_ + (this->desired_setpoint_ - this->room_temperature_);
     // Never let the unit thermostat-off: it idles when intake > b13 + 1, so
     // the floor applies to the INTENDED value - boost comes off after.
     wire = std::min(30.0f, std::max(wire, std::max(this->intake_temperature_ - 1.0f, 16.0f)));
@@ -236,11 +240,10 @@ float PanasonicAC::compute_wire_setpoint() const {
     // put in b3.
     // RESOLVED 2026-10-20 (live, kinderzimmer): the unit's REALIZED boost
     // deviates from the byte-derived B - pure B cancellation made the room
-    // undershoot. Cancel HALF of B instead: a linear scale analogous to the
-    // (desired - room) / 2 half-step in the main law, rather than a fixed
-    // offset (a constant BOOST_BASELINE=0.5 correction was fitted at B=1.0;
-    // B/2 gives the identical result there while generalizing to other B).
-    // The internal_boost member and its sensor keep showing the true B.
+    // undershoot. Cancel HALF of B instead: a linear scale rather than a
+    // fixed offset (a constant BOOST_BASELINE=0.5 correction was fitted at
+    // B=1.0; B/2 gives the identical result there while generalizing to
+    // other B). The internal_boost member and its sensor keep the true B.
     if (!std::isnan(this->internal_boost_)) {
       wire -= this->internal_boost_ / 2.0f;
       wire = std::floor(wire * 2.0f) / 2.0f;  // B/2 can land off-grid (0.25 steps); floor re-grids for exact write-skip/echo
