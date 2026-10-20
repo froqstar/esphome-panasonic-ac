@@ -27,6 +27,7 @@ class PanasonicACCNT : public PanasonicAC {
   void on_eco_change(bool eco) override;
   void on_econavi_change(bool eco) override;
   void on_mild_dry_change(bool mild_dry) override;
+  void on_room_change() override;
 
   void setup() override;
   void loop() override;
@@ -42,6 +43,9 @@ class PanasonicACCNT : public PanasonicAC {
   void handle_cmd();
 
   void set_data(bool set);
+
+  void handle_reported_setpoint(uint8_t raw);  // Adoption + sync after each poll (compensation mode)
+  void sync_compensation();                    // Recompute and stage the compensated wire setpoint
 
   void send_command(std::vector<uint8_t> command, CommandType type, uint8_t header);
   void send_packet(const std::vector<uint8_t> &command, CommandType type);

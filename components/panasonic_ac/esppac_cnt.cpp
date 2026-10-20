@@ -240,7 +240,30 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
     }
   }
 
-  if (call.get_target_temperature().has_value()) {
+  if (this->compensation_active()) {
+    // Store the HA (display) setpoint; fold the computed wire value into this
+    // same staged frame so a mode+temp call never needs a second frame.
+    if (call.get_target_temperature().has_value()) {
+      float t = std::min(30.0f, std::max(*call.get_target_temperature(), 16.0f));
+      this->desired_setpoint_ = t;  // display units (HA target)
+      this->save_desired_setpoint(t);
+      ESP_LOGV(TAG, "Stored desired setpoint %.1f", t);
+    }
+
+    // Effective mode after this command decides if a setpoint is wanted.
+    // No mode in this command -> what we last wanted is the right base.
+    climate::ClimateMode effective_mode =
+        call.get_mode().has_value() ? *call.get_mode() : this->mode;
+    if (effective_mode != climate::CLIMATE_MODE_OFF &&
+        effective_mode != climate::CLIMATE_MODE_FAN_ONLY) {
+      float wire = this->compute_wire_setpoint();  // law (+boost cancel) or plain fallback
+      if (!std::isnan(wire)) {
+        this->cmd[1] = (uint8_t)(wire / TEMPERATURE_STEP);  // wire already final
+        this->last_sent_setpoint_ = wire;
+        ESP_LOGV(TAG, "Compensated wire setpoint %.1f staged", wire);
+      }
+    }
+  } else if (call.get_target_temperature().has_value()) {
     ESP_LOGV(TAG, "Requested target temp change to %.2f, %.2f including offset", *call.get_target_temperature(), *call.get_target_temperature() - this->current_temperature_offset_);
     this->cmd[1] = (*call.get_target_temperature() - this->current_temperature_offset_) / TEMPERATURE_STEP;
   }
@@ -307,6 +330,11 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
     else
       ESP_LOGV(TAG, "Unsupported preset requested");
   }
+
+  if (this->compensation_active()) {
+    this->last_command_time_ = millis();
+    this->has_sent_command_ = true;
+  }
 }
 
 /*
@@ -325,18 +353,23 @@ void PanasonicACCNT::set_data(bool set) {
   bool econavi = determine_econavi(this->data[5]);
   bool mildDry = determine_mild_dry(this->data[2]);
 
-  this->update_target_temperature((int8_t) this->data[1]);
+  if (!this->compensation_active())
+    this->update_target_temperature((int8_t) this->data[1]);
 
   if (set) {
     // Also set current and outside temperature
     // 128 means not supported
-    if (this->current_temperature_sensor_ == nullptr) {
+    // Intake is always processed (raw stored for the law); display follows
+    // upstream rules only in plain mode (inside update_current_temperature).
+    if (this->rx_buffer_.size() >= 22) {
       if (this->rx_buffer_[18] != 0x80)
         this->update_current_temperature((int8_t) this->rx_buffer_[18]);
       else if (this->rx_buffer_[21] != 0x80)
         this->update_current_temperature((int8_t) this->rx_buffer_[21]);
       else
         ESP_LOGV(TAG, "Current temperature is not supported");
+    } else {
+      ESP_LOGV(TAG, "Current temperature is not supported");
     }
 
     if (this->outside_temperature_sensor_ != nullptr) {
@@ -352,6 +385,21 @@ void PanasonicACCNT::set_data(bool set) {
       uint16_t power_consumption = determine_power_consumption(
           (int8_t) this->rx_buffer_[28], (int8_t) this->rx_buffer_[29], (int8_t) this->rx_buffer_[30]);
       this->update_current_power_consumption(power_consumption);
+    }
+
+    // Byte 13 = unit's internal setpoint after its own boosts (outside-temp
+    // shift, powerful, mode shifts), raw x0.5 like target byte 3. Boost
+    // B = (b13 - b3)/2; 0 when OFF (b13 == b3 by design). Both are control
+    // fields (never the 0x80 sensor sentinel) - guard anyway. Stored to the
+    // member unconditionally (consumed by the compensation law); the sensor
+    // publish is a no-op when no internal_boost: sensor is attached.
+    if (this->rx_buffer_.size() >= 14) {
+      uint8_t raw_target = this->rx_buffer_[3];
+      uint8_t raw_internal = this->rx_buffer_[13];
+      if (raw_target != 0x80 && raw_internal != 0x80) {
+        this->internal_boost_ = ((float) raw_internal - (float) raw_target) * 0.5f;
+        this->update_internal_boost(this->internal_boost_);  // publishes only if sensor attached
+      }
     }
 
     if (this->defrost_sensor_ != nullptr) {
@@ -382,6 +430,12 @@ void PanasonicACCNT::set_data(bool set) {
   this->update_eco(eco);
   this->update_econavi(econavi);
   this->update_mild_dry(mildDry);
+
+  // In compensation mode the published target is the desired (display) value,
+  // never the wire echo. handle_reported_setpoint refreshes it after adoption.
+  if (this->compensation_active() && !std::isnan(this->desired_setpoint_))
+    this->target_temperature = this->desired_setpoint_;
+
   this->action = this->determine_action();
 }
 
@@ -484,13 +538,94 @@ void PanasonicACCNT::handle_packet() {
     this->data = std::vector<uint8_t>(this->rx_buffer_.begin() + 2, this->rx_buffer_.begin() + 12);
 
     this->set_data(true);
-    this->publish_state();
-
     if (this->state_ != ACState::Ready)
       this->state_ = ACState::Ready;  // Mark as ready after first poll
+    // Compensation runs after set_data (fresh intake + boost) and after the
+    // Ready flip (so the first poll's sync is not blocked); before publish so
+    // HA sees the result.
+    if (this->compensation_active())
+      this->handle_reported_setpoint((uint8_t) this->data[1]);
+    this->publish_state();
   } else {
     ESP_LOGD(TAG, "Received unknown packet");
   }
+}
+
+/*
+ * External-sensor setpoint compensation (CNT)
+ */
+
+void PanasonicACCNT::handle_reported_setpoint(uint8_t raw) {
+  float wire = raw * TEMPERATURE_STEP;  // WIRE units - comp mode bypasses display conversions
+  bool outside_grace = (millis() - this->last_command_time_ >= GRACE_MS);
+  // Upstream pairing: displayed = wire + offset
+  float candidate = wire + this->current_temperature_offset_;
+
+  if (std::isnan(this->desired_setpoint_) && !this->has_sent_command_) {
+    // First-ever boot / pref miss: seed from the unit's retained wire value
+    // and suppress one redundant boot write.
+    this->desired_setpoint_ = candidate;
+    this->last_sent_setpoint_ = wire;
+    this->save_desired_setpoint(candidate);
+    ESP_LOGD(TAG, "Seeded desired setpoint %.1f from retained wire %.1f", candidate, wire);
+  } else if (outside_grace && this->has_sent_command_) {
+    bool is_echo = !std::isnan(this->last_sent_setpoint_) &&
+                   fabs(wire - this->last_sent_setpoint_) <= SETPOINT_EPSILON;
+    // Remote numbers mean desired ROOM temp, adopted as-is (do NOT invert the
+    // law). Own echoes read back exactly as last_sent and are skipped here.
+    if (!is_echo && fabs(candidate - this->desired_setpoint_) > SETPOINT_EPSILON) {
+      this->desired_setpoint_ = candidate;  // remote press -> adopt (display units)
+      this->save_desired_setpoint(candidate);
+      ESP_LOGD(TAG, "Adopted remote setpoint %.1f as desired (wire %.1f)", candidate, wire);
+    }
+  }
+
+  if (!std::isnan(this->desired_setpoint_))
+    this->target_temperature = this->desired_setpoint_;  // publish shows desired
+
+  this->sync_compensation();  // reads THIS poll's intake + boost
+}
+
+void PanasonicACCNT::sync_compensation() {
+  if (!this->compensation_active())
+    return;
+  if (this->state_ != ACState::Ready)
+    return;
+  // Grace gate: our own staged command may not have echoed yet; the data
+  // snapshot it would rebuild from could still be pre-command (deviation from
+  // the YAML, which only gated adoption).
+  if (this->has_sent_command_ && millis() - this->last_command_time_ < GRACE_MS)
+    return;
+  if (std::isnan(this->desired_setpoint_))
+    return;
+  if (this->mode == climate::CLIMATE_MODE_OFF || this->mode == climate::CLIMATE_MODE_FAN_ONLY)
+    return;  // no setpoint staging while off/fan
+
+  float wire = this->compute_wire_setpoint();  // law (+boost cancel) or plain fallback
+  if (std::isnan(wire))
+    return;
+
+  // Skip CNT writes when the wire value is unchanged (exact - both sides are
+  // on the 0.5 grid).
+  if (!std::isnan(this->last_sent_setpoint_) && wire == this->last_sent_setpoint_) {
+    ESP_LOGD(TAG, "skip write: unchanged (wire=%.1f)", wire);
+    return;
+  }
+
+  if (this->cmd.empty()) {
+    ESP_LOGV(TAG, "Copying data to cmd");
+    this->cmd = this->data;
+  }
+  this->cmd[1] = (uint8_t)(wire / TEMPERATURE_STEP);  // wire already final
+  this->last_sent_setpoint_ = wire;
+  this->last_command_time_ = millis();
+  this->has_sent_command_ = true;
+  ESP_LOGD(TAG, "Staged compensated wire setpoint %.1f", wire);
+}
+
+void PanasonicACCNT::on_room_change() {
+  if (this->state_ == ACState::Ready)
+    this->sync_compensation();
 }
 
 /*

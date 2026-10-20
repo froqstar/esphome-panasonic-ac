@@ -36,6 +36,8 @@ void PanasonicAC::setup() {
   this->set_supported_custom_fan_modes({"Automatic", "1", "2", "3", "4", "5"});
   this->set_supported_custom_presets({"Normal", "Powerful", "Quiet"});
 
+  this->maybe_restore_desired_setpoint();
+
   ESP_LOGI(TAG, "Panasonic AC component v%s starting...", VERSION);
 }
 
@@ -77,15 +79,19 @@ void PanasonicAC::update_outside_temperature(int8_t temperature) {
 
 void PanasonicAC::update_current_temperature(int8_t temperature) {
   ESP_LOGV(TAG, "Received current temperature %d", temperature);
-  temperature += this->current_temperature_offset_;
 
   if (temperature > TEMPERATURE_THRESHOLD) {
     ESP_LOGW(TAG, "Received out of range inside temperature: %d", temperature);
     return;
   }
 
-  this->current_temperature = temperature;
-  ESP_LOGV(TAG, "Current temperature incl. offset: %d", temperature);
+  this->intake_temperature_ = temperature;  // RAW intake for the law
+
+  if (!this->compensation_active()) {  // plain mode only (upstream display)
+    temperature += this->current_temperature_offset_;
+    this->current_temperature = temperature;
+    ESP_LOGV(TAG, "Current temperature incl. offset: %d", temperature);
+  }
 }
 
 void PanasonicAC::update_target_temperature(uint8_t raw_value) {
@@ -159,11 +165,23 @@ climate::ClimateAction PanasonicAC::determine_action() {
     return climate::CLIMATE_ACTION_FAN;
   } else if (this->mode == climate::CLIMATE_MODE_DRY) {
     return climate::CLIMATE_ACTION_DRYING;
-  } else if ((this->mode == climate::CLIMATE_MODE_COOL || this->mode == climate::CLIMATE_MODE_HEAT_COOL) &&
-             this->current_temperature + TEMPERATURE_TOLERANCE >= this->target_temperature) {
+  }
+
+  // In compensation mode compare raw intake against the wire value we actually
+  // sent (like upstream did vs the biased wire); fall back to display values.
+  float current = this->current_temperature;
+  float target = this->target_temperature;
+  if (this->compensation_active() && !std::isnan(this->intake_temperature_) &&
+      !std::isnan(this->last_sent_setpoint_)) {
+    current = this->intake_temperature_;
+    target = this->last_sent_setpoint_;
+  }
+
+  if ((this->mode == climate::CLIMATE_MODE_COOL || this->mode == climate::CLIMATE_MODE_HEAT_COOL) &&
+      current + TEMPERATURE_TOLERANCE >= target) {
     return climate::CLIMATE_ACTION_COOLING;
   } else if ((this->mode == climate::CLIMATE_MODE_HEAT || this->mode == climate::CLIMATE_MODE_HEAT_COOL) &&
-             this->current_temperature - TEMPERATURE_TOLERANCE <= this->target_temperature) {
+             current - TEMPERATURE_TOLERANCE <= target) {
     return climate::CLIMATE_ACTION_HEATING;
   } else {
     return climate::CLIMATE_ACTION_IDLE;
@@ -177,10 +195,74 @@ void PanasonicAC::update_current_power_consumption(int16_t power) {
   }
 }
 
+void PanasonicAC::update_internal_boost(float boost) {
+  ESP_LOGV(TAG, "Received internal boost %.1f", boost);
+  if (this->internal_boost_sensor_ != nullptr && this->internal_boost_sensor_->state != boost) {
+    this->internal_boost_sensor_->publish_state(boost);  // Publish on change only
+  }
+}
+
 void PanasonicAC::update_defrost(bool defrost) {
   if (this->defrost_sensor_ != nullptr) {
     this->defrost_sensor_->publish_state(defrost);
   }
+}
+
+/*
+ * External-sensor setpoint compensation
+ */
+
+float PanasonicAC::compute_wire_setpoint() const {
+  if (std::isnan(this->desired_setpoint_))
+    return NAN;
+
+  float wire;
+  if (std::isnan(this->room_temperature_) || std::isnan(this->intake_temperature_)) {
+    // Fallback = plain-mode / upstream logic. Deliberately NO boost
+    // subtraction - the default path must byte-match what a
+    // non-compensating setup sends.
+    wire = std::floor((this->desired_setpoint_ - this->current_temperature_offset_) * 2.0f) / 2.0f;
+  } else {
+    // Intended effective internal setpoint (what byte 13 should end up as):
+    wire = this->intake_temperature_ + (this->desired_setpoint_ - this->room_temperature_) / 2.0f;
+    // Never let the unit thermostat-off: it idles when intake > b13 + 1, so
+    // the floor applies to the INTENDED value - boost comes off after.
+    wire = std::min(30.0f, std::max(wire, std::max(this->intake_temperature_ - 1.0f, 16.0f)));
+    wire = std::floor(wire * 2.0f) / 2.0f;
+
+    // Feedforward-cancel the unit's internal boost: the compressor tracks
+    // b13 = b3 + B, so the unit settles intake B degrees above whatever we
+    // put in b3. Sending (intended - B) lands the effective internal
+    // setpoint exactly on the law output.
+    // NOTE (uncertain, revisit with live data): it is unclear whether the
+    // unit always adds at least 1 degC internally regardless of the
+    // measured (b13 - b3)/2 - if so, we would need to subtract 1 degree
+    // LESS than the measured boost here to avoid over-correcting.
+    if (!std::isnan(this->internal_boost_)) {
+      wire -= this->internal_boost_;
+      wire = std::floor(wire * 2.0f) / 2.0f;  // B is on the 0.5 grid -> identity; guards float noise
+    }
+  }
+  return std::min(30.0f, std::max(wire, 16.0f));
+}
+
+void PanasonicAC::maybe_restore_desired_setpoint() {
+  if (!this->compensation_active())
+    return;
+
+  // Unique per entity so multiple units on one ESP don't collide
+  uint32_t hash = this->get_object_id_hash() ^ fnv1_hash("desired_setpoint");
+  this->desired_setpoint_pref_ = global_preferences->make_preference<float>(hash);
+
+  float restored;
+  if (this->desired_setpoint_pref_.load(&restored) && !std::isnan(restored)) {
+    this->desired_setpoint_ = restored;
+    ESP_LOGI(TAG, "Restored desired setpoint %.1f", restored);
+  }
+}
+
+void PanasonicAC::save_desired_setpoint(float desired) {
+  this->desired_setpoint_pref_.save(&desired);  // no-op if preference never bound
 }
 
 /*
@@ -215,8 +297,10 @@ void PanasonicAC::set_current_temperature_sensor(sensor::Sensor *current_tempera
   this->current_temperature_sensor_ = current_temperature_sensor;
   this->current_temperature_sensor_->add_on_state_callback([this](float state)
                                                            {
+                                                             this->room_temperature_ = state;  // RAW for the law
                                                              this->current_temperature = state + this->current_temperature_offset_;
                                                              this->publish_state();
+                                                             this->on_room_change();
                                                            });
 }
 
@@ -276,6 +360,10 @@ void PanasonicAC::set_mild_dry_switch(switch_::Switch *mild_dry_switch) {
 
 void PanasonicAC::set_current_power_consumption_sensor(sensor::Sensor *current_power_consumption_sensor) {
   this->current_power_consumption_sensor_ = current_power_consumption_sensor;
+}
+
+void PanasonicAC::set_internal_boost_sensor(sensor::Sensor *internal_boost_sensor) {
+  this->internal_boost_sensor_ = internal_boost_sensor;
 }
 
 void PanasonicAC::set_defrost_sensor(binary_sensor::BinarySensor *defrost_sensor) {
