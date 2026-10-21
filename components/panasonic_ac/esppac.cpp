@@ -217,25 +217,40 @@ float PanasonicAC::compute_wire_setpoint() const {
     return NAN;
 
   bool law_valid = !std::isnan(this->room_temperature_) && !std::isnan(this->intake_temperature_);
+  bool v6_heat = law_valid && this->mode == climate::CLIMATE_MODE_HEAT && !std::isnan(this->internal_boost_);
   float wire;
+  float gap_ss = NAN, e_star = NAN;  // v6 intermediates (logged)
   if (!law_valid) {
     // Fallback = plain-mode / upstream logic. Deliberately NO boost
     // subtraction - the default path must byte-match what a
     // non-compensating setup sends.
     wire = std::floor((this->desired_setpoint_ - this->current_temperature_offset_) * 2.0f) / 2.0f;
+  } else if (v6_heat) {
+    // v6 gap-scheduling law (HEAT only until cooling has field data).
+    // E* = clamp(desired - room + gap_ss - LEAD, -2.5, +2.5); b13 = intake + E*;
+    // wire cancels the FULL boost so realized b13 tracks E* through B transients.
+    // gap_ss = -1 + B/4 (B clamped [0, 4]): standing gap at target, B=0 -> -1
+    // (warm, min-zone D=+1.5 with LEAD, a full 0.5 K above the +2.0 OFF point),
+    // B=4 -> 0 (cold/powerful: no boost amplification of the gap).
+    float boost = std::min(HEAT_BOOST_SCALE, std::max(0.0f, this->internal_boost_));
+    gap_ss = HEAT_GAP_WARM * (1.0f - boost / HEAT_BOOST_SCALE);
+    e_star = this->desired_setpoint_ - this->room_temperature_ + gap_ss - HEAT_LEAD;
+    e_star = std::min(HEAT_E_MAX, std::max(HEAT_E_MIN, e_star));
+    wire = std::floor((this->intake_temperature_ + e_star - this->internal_boost_) * 2.0f) / 2.0f;
   } else {
-    // Intended effective internal setpoint (what byte 13 should end up as):
-    // Full proportional on the raw error - 2026-10-20: the earlier
-    // (desired - room) / 2 half-step gave the unit too much deadband and
-    // produced over/undershoot; drive it aggressively, the unit's own
-    // hysteresis still damps the response.
+    // Legacy law (cool / heat-cool / boost not yet known): full proportional
+    // on the raw error - 2026-10-20: the earlier (desired - room)/2 half-step
+    // left too much deadband and produced over/undershoot.
     wire = this->intake_temperature_ + (this->desired_setpoint_ - this->room_temperature_);
-    // Never let the unit thermostat-off: it idles when intake > b13 + 1, so
-    // the floor applies to the INTENDED value - boost comes off after.
+    // Never let the unit thermostat-off: the service manual turns the
+    // compressor off when intake - b13 > +2.0 K (3-min restart below), so
+    // b13 >= intake - 1 holds D <= +1, a full K below OFF. Floor applies to
+    // the INTENDED value - the boost subtraction below shifts realized b13
+    // back up, making D even smaller.
     wire = std::min(30.0f, std::max(wire, std::max(this->intake_temperature_ - 1.0f, 16.0f)));
     wire = std::floor(wire * 2.0f) / 2.0f;
 
-    // Feedforward-cancel the unit's internal boost: the compressor tracks
+    // Feedforward-cancel half the unit's internal boost: the compressor tracks
     // b13 = b3 + B, so the unit settles intake B degrees above whatever we
     // put in b3.
     // RESOLVED 2026-10-20 (live, kinderzimmer): the unit's REALIZED boost
@@ -252,17 +267,30 @@ float PanasonicAC::compute_wire_setpoint() const {
   wire = std::min(30.0f, std::max(wire, 16.0f));
 
   // Log every calculation with its inputs (desired in display units, room
-  // raw sensor, intake raw packet, boost (b13-b3)/2, wire = actual byte).
+  // raw sensor, intake raw packet, boost (b13-b3)/2, wire = actual byte)
+  // plus last-poll diagnostics: operating state byte, realized thermostat
+  // gap D = intake - b13, instantaneous power.
   if (!law_valid) {
-    ESP_LOGD(TAG, "Setpoint calc (fallback, sensors stale): desired=%.1f offset=%d -> wire=%.1f",
-             this->desired_setpoint_, this->current_temperature_offset_, wire);
+    ESP_LOGD(TAG, "Setpoint calc (fallback, sensors stale): desired=%.1f offset=%d -> wire=%.1f "
+                  "(state=0x%02X D=%.1f pw=%.0fW)",
+             this->desired_setpoint_, this->current_temperature_offset_, wire, this->last_state_byte_,
+             this->last_reported_gap_, this->last_power_w_);
+  } else if (v6_heat) {
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f -> wire=%.1f "
+                  "(gap_ss=%.2f E*=%.2f state=0x%02X D=%.1f pw=%.0fW)",
+             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
+             wire, gap_ss, e_star, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
   } else if (std::isnan(this->internal_boost_)) {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f (no cancellation yet)",
-             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_, wire);
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f (no cancellation yet) "
+                  "(state=0x%02X D=%.1f pw=%.0fW)",
+             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_, wire, this->last_state_byte_,
+             this->last_reported_gap_, this->last_power_w_);
   } else {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f (cancel %.1f = B/2) -> wire=%.1f",
-             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_,
-             this->internal_boost_, this->internal_boost_ / 2.0f, wire);
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f (cancel %.1f = B/2) -> wire=%.1f "
+                  "(state=0x%02X D=%.1f pw=%.0fW)",
+             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
+             this->internal_boost_ / 2.0f, wire, this->last_state_byte_, this->last_reported_gap_,
+             this->last_power_w_);
   }
   return wire;
 }

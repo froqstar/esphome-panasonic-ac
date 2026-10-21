@@ -31,6 +31,16 @@ static const uint8_t TEMPERATURE_THRESHOLD =
 static const uint32_t GRACE_MS = 6000;      // Grace after our own command masking echoes/stale state (1 poll + slack)
 static const float SETPOINT_EPSILON = 0.25f;  // Echo/adopt tolerance; half a 0.5 step, absorbs only float noise
 
+// v6 gap-scheduling heat law (service-manual derived, cross-gen consistent):
+// thermostat OFF when D = intake - b13 > +2.0 K (quantized: first at +2.5),
+// restart after 3 min while D < +2.0; frequency MAX zone at D <= -2.5;
+// minimum/decrease zone once D >= -1.
+static const float HEAT_GAP_WARM = -1.0f;    // Standing gap (b13 - intake) at B = 0 (warm weather, no boost)
+static const float HEAT_LEAD = 0.5f;         // Overshoot back-off (K) subtracted from E* (thermal-lag knob)
+static const float HEAT_E_MIN = -2.5f;       // E* floor: D = +2.5 > +2.0 manual OFF point (terminal OFF allowed)
+static const float HEAT_E_MAX = 2.5f;        // E* cap = frequency MAX zone boundary (D = -2.5)
+static const float HEAT_BOOST_SCALE = 4.0f;  // B at which the standing gap reaches 0 (also schedule clamp)
+
 enum class CommandType { Normal, Response, Resend };
 
 enum class ACType {
@@ -90,6 +100,11 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   uint32_t last_command_time_ = 0;         // Grace anchor; 0 until first staged command
   bool has_sent_command_ = false;          // Boot guard: unit's retained setpoint not treated as user input
   ESPPreferenceObject desired_setpoint_pref_;  // Persist desired_setpoint_ across reboots
+
+  // Last-poll diagnostics (CNT) appended to the Setpoint calc log
+  uint8_t last_state_byte_ = 0;    // Frame byte 12: observed 0x4C running / 0x40 idle (kinderzimmer)
+  float last_reported_gap_ = NAN;  // D = intake - b13 from this poll's frame (thermostat input)
+  float last_power_w_ = NAN;       // Instantaneous power, bytes 28-30
 
   bool waiting_for_response_ = false;  // Set to true if we are waiting for a response
 

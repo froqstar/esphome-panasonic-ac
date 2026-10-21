@@ -403,8 +403,18 @@ void PanasonicACCNT::set_data(bool set) {
       if (raw_target != 0x80 && raw_internal != 0x80) {
         this->internal_boost_ = ((float) raw_internal - (float) raw_target) * 0.5f;
         this->update_internal_boost(this->internal_boost_);  // publishes only if sensor attached
+        if (!std::isnan(this->intake_temperature_))
+          this->last_reported_gap_ = this->intake_temperature_ - (float) raw_internal * 0.5f;  // D = intake - b13
       }
     }
+
+    // Diagnostics for the Setpoint calc log: operating state (frame byte 12,
+    // observed 0x4C running / 0x40 idle) and instantaneous power (bytes 28-30).
+    if (this->rx_buffer_.size() >= 13)
+      this->last_state_byte_ = this->rx_buffer_[12];
+    if (this->rx_buffer_.size() >= 31)
+      this->last_power_w_ = (float) determine_power_consumption(
+          (int8_t) this->rx_buffer_[28], (int8_t) this->rx_buffer_[29], (int8_t) this->rx_buffer_[30]);
 
     if (this->defrost_sensor_ != nullptr) {
       if (this->rx_buffer_.size() >= 15) {
