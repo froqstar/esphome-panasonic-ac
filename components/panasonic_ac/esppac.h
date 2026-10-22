@@ -31,15 +31,32 @@ static const uint8_t TEMPERATURE_THRESHOLD =
 static const uint32_t GRACE_MS = 6000;      // Grace after our own command masking echoes/stale state (1 poll + slack)
 static const float SETPOINT_EPSILON = 0.25f;  // Echo/adopt tolerance; half a 0.5 step, absorbs only float noise
 
-// v6 gap-scheduling heat law (service-manual derived, cross-gen consistent):
-// thermostat OFF when D = intake - b13 > +2.0 K (quantized: first at +2.5),
-// restart after 3 min while D < +2.0; frequency MAX zone at D <= -2.5;
-// minimum/decrease zone once D >= -1.
-static const float HEAT_GAP_WARM = -1.0f;    // Standing gap (b13 - intake) at B = 0 (warm weather, no boost)
-static const float HEAT_LEAD = 0.5f;         // Overshoot back-off (K) subtracted from E* (thermal-lag knob)
-static const float HEAT_E_MIN = -2.5f;       // E* floor: D = +2.5 > +2.0 manual OFF point (terminal OFF allowed)
-static const float HEAT_E_MAX = 2.5f;        // E* cap = frequency MAX zone boundary (D = -2.5)
-static const float HEAT_BOOST_SCALE = 4.0f;  // B at which the standing gap reaches 0 (also schedule clamp)
+// v7 cruise heat law (2026-10-22 fixed-wire D-threshold experiment, wohnzimmer):
+// thermostat OFF when realized D = intake - b13 crosses ~+0.5..+1.0 (drifty:
+// observed 0.0 / 0.5 / 1.0 across three sweeps), restart when D falls to
+// ~0.0 (started 11 s into a hold at D=0). The > +2.0 K marker from the
+// service manual is NOT the real stop point - stops happen far below it.
+// Cruise target = LEAD (+0.5), just under the stop threshold, holding the
+// unit on with gentle charging inside a ~1 K room band (start ~desired-0.5,
+// stop ~desired..+0.5) - long cycles instead of the v6 flapping, which
+// cruised above the stop threshold (D +0.5..+1.5).
+static const float HEAT_GAP_WARM = 0.0f;     // Standing gap (b13 - intake) at target: 0 -> cruise D = LEAD for any B
+static const float HEAT_LEAD = 0.5f;         // Cruise D = -E* at room == desired; also the overshoot back-off
+static const float HEAT_E_MIN = -2.5f;       // E* floor: D = +2.5 terminal-OFF dive (room >= desired + 2.0)
+static const float HEAT_E_MAX = 2.5f;        // E* cap: D = -2.5 max-heat dive (room <= desired - 3.0)
+static const float HEAT_BOOST_SCALE = 4.0f;  // B clamp used by the law (schedule no longer used)
+static const float HEAT_OVERSHOOT_SINK = 4.0f;  // Overshoot latch: setpoint sink while latched
+// Overshoot latch: set when the unit goes idle while the room is above the
+// desired setpoint (it heated past the user's target). While latched the law
+// sees desired - HEAT_OVERSHOOT_SINK, saturating E* at HEAT_E_MIN -> D pinned
+// at +2.5 (terminal hold) so the unit cannot restart. Cleared when the room
+// dips to (desired - 0.5) or on any user setpoint/mode input (HA or remote).
+
+// Set false to run WITHOUT the compensation law (threshold-experiment builds):
+// the climate target passes straight through to the unit's b3, while the
+// Setpoint calc log line keeps reporting room/intake/boost/wire/state/D/pw
+// so external tooling can still observe and steer the unit.
+static const bool COMPENSATION_ENABLED = true;
 
 enum class CommandType { Normal, Response, Resend };
 
@@ -96,6 +113,7 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   float intake_temperature_ = NAN;         // Raw packet intake temperature for the law
   float internal_boost_ = NAN;             // Measured boost B = (b13 - b3)/2, always populated each poll
   float desired_setpoint_ = NAN;           // User/HA setpoint in display units (persisted)
+  bool overshoot_ = false;                 // Heat over-target latch (see HEAT_OVERSHOOT_SINK)
   float last_sent_setpoint_ = NAN;         // Wire value we last staged (post-cancellation, actual byte)
   uint32_t last_command_time_ = 0;         // Grace anchor; 0 until first staged command
   bool has_sent_command_ = false;          // Boot guard: unit's retained setpoint not treated as user input
@@ -137,7 +155,9 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
 
   // Compensation helpers (CNT uses these; WLAN never activates compensation)
   bool compensation_active() const { return this->current_temperature_sensor_ != nullptr; }
-  float compute_wire_setpoint() const;  // Law (+boost cancel) or plain fallback; wire space, NAN if desired unknown
+  float compute_wire_setpoint();  // Law (+boost cancel) or plain fallback; wire space, NAN if desired unknown
+  void note_unit_idle();   // Idle transition (CNT): latch overshoot when room over desired
+  void note_user_change();  // User setpoint/mode input (HA or remote): clear the overshoot latch
   void maybe_restore_desired_setpoint();
   void save_desired_setpoint(float desired);
   virtual void on_room_change() {}  // Called when the room sensor reports; CNT overrides to sync

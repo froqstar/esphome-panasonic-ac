@@ -207,6 +207,12 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
   if (this->state_ != ACState::Ready)
     return;
 
+  // Any HA mode/setpoint input releases the overshoot latch (before the
+  // staged setpoint below is computed, so the new command is honored).
+  if (this->compensation_active() &&
+      (call.get_mode().has_value() || call.get_target_temperature().has_value()))
+    this->note_user_change();
+
   if (this->cmd.empty()) {
     ESP_LOGV(TAG, "Copying data to cmd");
     this->cmd = this->data;
@@ -343,7 +349,12 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
  * Set the data array to the fields
  */
 void PanasonicACCNT::set_data(bool set) {
-  this->mode = determine_mode(this->data[0]);
+  auto new_mode = determine_mode(this->data[0]);
+  // Remote mode change / power toggle (incl. echoes of our own commands,
+  // which are idempotent): releases the overshoot latch like any user input.
+  if (this->compensation_active() && new_mode != this->mode)
+    this->note_user_change();
+  this->mode = new_mode;
   this->set_custom_fan_mode_(determine_fan_speed(this->data[3]));
 
   StringRef verticalSwing(determine_vertical_swing(this->data[4]));
@@ -410,8 +421,12 @@ void PanasonicACCNT::set_data(bool set) {
 
     // Diagnostics for the Setpoint calc log: operating state (frame byte 12,
     // observed 0x4C running / 0x40 idle) and instantaneous power (bytes 28-30).
-    if (this->rx_buffer_.size() >= 13)
-      this->last_state_byte_ = this->rx_buffer_[12];
+    if (this->rx_buffer_.size() >= 13) {
+      uint8_t state = this->rx_buffer_[12];
+      if (state == 0x40 && this->last_state_byte_ != 0x40)
+        this->note_unit_idle();  // idle transition: latch overshoot if room over desired
+      this->last_state_byte_ = state;
+    }
     if (this->rx_buffer_.size() >= 31)
       this->last_power_w_ = (float) determine_power_consumption(
           (int8_t) this->rx_buffer_[28], (int8_t) this->rx_buffer_[29], (int8_t) this->rx_buffer_[30]);
@@ -590,6 +605,7 @@ void PanasonicACCNT::handle_reported_setpoint(uint8_t raw) {
     if (!is_echo && fabs(candidate - this->desired_setpoint_) > SETPOINT_EPSILON) {
       this->desired_setpoint_ = candidate;  // remote press -> adopt (display units)
       this->save_desired_setpoint(candidate);
+      this->note_user_change();  // remote press releases the overshoot latch
       ESP_LOGD(TAG, "Adopted remote setpoint %.1f as desired (wire %.1f)", candidate, wire);
     }
   }
