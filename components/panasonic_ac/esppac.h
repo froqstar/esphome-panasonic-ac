@@ -45,12 +45,12 @@ static const float HEAT_LEAD = 0.5f;         // Cruise D = -E* at room == desire
 static const float HEAT_E_MIN = -2.5f;       // E* floor: D = +2.5 terminal-OFF dive (room >= desired + 2.0)
 static const float HEAT_E_MAX = 2.5f;        // E* cap: D = -2.5 max-heat dive (room <= desired - 3.0)
 static const float HEAT_BOOST_SCALE = 4.0f;  // B clamp used by the law (schedule no longer used)
-static const float HEAT_OVERSHOOT_SINK = 4.0f;  // Overshoot latch: setpoint sink while latched
 // Overshoot latch: set when the unit goes idle while the room is above the
 // desired setpoint (it heated past the user's target). While latched the law
-// sees desired - HEAT_OVERSHOOT_SINK, saturating E* at HEAT_E_MIN -> D pinned
-// at +2.5 (terminal hold) so the unit cannot restart. Cleared when the room
-// dips to (desired - 0.5) or on any user setpoint/mode input (HA or remote).
+// is bypassed and the wire is pinned at 16 (the lowest the unit accepts),
+// putting b13 far below any restart criterion (D ~ +5..+6) - a hard OFF hold.
+// Cleared when the room dips to (desired - 0.5) or on any user setpoint/mode
+// input (HA or remote).
 
 // Set false to run WITHOUT the compensation law (threshold-experiment builds):
 // the climate target passes straight through to the unit's b3, while the
@@ -113,7 +113,7 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   float intake_temperature_ = NAN;         // Raw packet intake temperature for the law
   float internal_boost_ = NAN;             // Measured boost B = (b13 - b3)/2, always populated each poll
   float desired_setpoint_ = NAN;           // User/HA setpoint in display units (persisted)
-  bool overshoot_ = false;                 // Heat over-target latch (see HEAT_OVERSHOOT_SINK)
+  bool overshoot_ = false;                 // Heat over-target latch (wire pinned at 16 while set)
   float last_sent_setpoint_ = NAN;         // Wire value we last staged (post-cancellation, actual byte)
   uint32_t last_command_time_ = 0;         // Grace anchor; 0 until first staged command
   bool has_sent_command_ = false;          // Boot guard: unit's retained setpoint not treated as user input

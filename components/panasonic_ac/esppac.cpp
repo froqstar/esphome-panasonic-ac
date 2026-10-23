@@ -234,9 +234,11 @@ float PanasonicAC::compute_wire_setpoint() {
   if (std::isnan(this->desired_setpoint_))
     return NAN;
 
-  // Effective desired: the overshoot latch sinks the staged setpoint until the
-  // room gives back 0.5 K or the user intervenes. Passthrough experiment
-  // builds are exempt - their wire must stay raw for the sweeps.
+  // Effective desired: the overshoot latch hard-holds the unit OFF by pinning
+  // the wire at the unit's minimum (16) - the law is bypassed so no clamp can
+  // lift the wire back up (a mere desired-sink saturates at E_MIN and still
+  // allows D=+2.5 cruise margins). Cleared when the room gives back 0.5 K or
+  // the user intervenes. Passthrough experiment builds are exempt.
   float desired = this->desired_setpoint_;
   if (this->overshoot_ && COMPENSATION_ENABLED) {
     if (!std::isnan(this->room_temperature_) &&
@@ -246,9 +248,12 @@ float PanasonicAC::compute_wire_setpoint() {
                this->room_temperature_, desired);
     } else {
       // Room sensor stale -> latch stays (conservative: hold off).
-      desired -= HEAT_OVERSHOOT_SINK;
-      ESP_LOGI(TAG, "Overshoot latch active: desired %.1f -> %.1f (unit held off)",
-               desired + HEAT_OVERSHOOT_SINK, desired);
+      float wire = 16.0f;  // unit minimum; b13 = 16 + B stays far below intake
+      ESP_LOGD(TAG, "Setpoint calc (overshoot hold): desired=%.1f room=%.1f intake=%.1f -> wire=%.1f "
+                    "(state=0x%02X D=%.1f pw=%.0fW)",
+               desired, this->room_temperature_, this->intake_temperature_,
+               wire, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
+      return wire;
     }
   }
 
@@ -323,7 +328,7 @@ float PanasonicAC::compute_wire_setpoint() {
   wire = std::min(30.0f, std::max(wire, 16.0f));
 
   // Log every calculation with its inputs (desired = effective staged value,
-  // i.e. latched by HEAT_OVERSHOOT_SINK when active; room raw sensor; intake
+  // i.e. pinned to the 16 hold while the overshoot latch is active; room raw sensor; intake
   // raw packet; boost (b13-b3)/2; wire = actual byte) plus last-poll
   // diagnostics: operating state byte, realized thermostat gap D = intake -
   // b13, instantaneous power.
