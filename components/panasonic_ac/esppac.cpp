@@ -238,9 +238,9 @@ float PanasonicAC::compute_wire_setpoint() {
   // the wire at the unit's minimum (16) - the law is bypassed so no clamp can
   // lift the wire back up (a mere desired-sink saturates at E_MIN and still
   // allows D=+2.5 cruise margins). Cleared when the room gives back 0.5 K or
-  // the user intervenes. Passthrough experiment builds are exempt.
+  // the user intervenes.
   float desired = this->desired_setpoint_;
-  if (this->overshoot_ && COMPENSATION_ENABLED) {
+  if (this->overshoot_) {
     if (!std::isnan(this->room_temperature_) &&
         this->room_temperature_ <= desired - 0.5f) {
       this->overshoot_ = false;
@@ -257,64 +257,38 @@ float PanasonicAC::compute_wire_setpoint() {
     }
   }
 
-  if (!COMPENSATION_ENABLED) {
-    // Law disabled in code: upstream-plain byte - the climate target goes to
-    // the unit unchanged. Telemetry keeps flowing so external tooling can
-    // observe state/D/pw while steering the wire via the climate target.
-    float wire = std::floor((desired - this->current_temperature_offset_) * 2.0f) / 2.0f;
-    wire = std::min(30.0f, std::max(wire, 16.0f));
-    ESP_LOGD(TAG, "Setpoint calc (passthrough): desired=%.1f room=%.1f intake=%.1f boost=%.1f -> wire=%.1f "
-                  "(state=0x%02X D=%.1f pw=%.0fW)",
-             this->desired_setpoint_, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
-             wire, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
-    return wire;
-  }
+  // DELTA_SHIFT 2026-10-29: the room-setpoint delta is HALVED in the law - the
+  // units were "too aggressive" at full proportional. LEAD is dropped (no bias;
+  // the unit cruises right at the target instead of ~0.5 K under it).
 
   bool law_valid = !std::isnan(this->room_temperature_) && !std::isnan(this->intake_temperature_);
-  bool law_heat = law_valid && this->mode == climate::CLIMATE_MODE_HEAT && !std::isnan(this->internal_boost_);
   float wire;
-  float gap_ss = NAN, e_star = NAN;  // v7 intermediates (logged)
+  float e_star = NAN;  // law intermediate (logged)
   if (!law_valid) {
-    // Fallback = plain-mode / upstream logic. Deliberately NO boost
-    // subtraction - the default path must byte-match what a
-    // non-compensating setup sends.
+    // Fallback = plain-mode / upstream logic. The default path must
+    // byte-match what a non-compensating setup sends.
     wire = std::floor((desired - this->current_temperature_offset_) * 2.0f) / 2.0f;
-  } else if (law_heat) {
-    // v7.2 cruise law (HEAT only until cooling has field data).
-    // E* = clamp(desired - room + gap_ss - LEAD, -2.5, +2.5); b13 = intake + E*.
+  } else {
+    // v7.4 cruise law - single path for all modes (cool-cool / heat-cool merged
+    // 2026-10-29, was HEAT-only before): with the halved delta the former
+    // legacy branch reduced to the same math anyway; the heat law's shape was
+    // adopted for cooling too (symmetric +-2.5 K E* dive clamp instead of the
+    // unbounded 30 C cap + intake-1 floor, nearest-grid instead of floor()
+    // quantization).
+    // E* = clamp((desired - room) / 2, -2.5, +2.5); b13 = intake + E*.
+    // Half the room-setpoint delta (DELTA_SHIFT 2026-10-29), no LEAD bias.
     // NO boost compensation (removed 2026-10-29): the colder it gets outside,
     // the larger the byte-derived B - and cancelling it made the units
     // undershoot MORE (realized room-setpoint gap grew with B). The unit's own
     // boost behavior stays untouched; the law steers intake alone.
-    // gap_ss = 0 (GAP_WARM): realized D = room - desired + LEAD, so the
-    // running unit cruises at D = +0.5 while room approaches desired - just
-    // under the measured stop threshold (~+0.5..+1.0) - and crosses 0 /
-    // restart once room falls ~0.5 K below the target. Starts too deep
-    // (D > -2.5) are too rare to matter and self-correct via the clamps.
     // Nearest-grid quantization (v7.1): floor() ate up to 0.4 K of commanded
     // heat (field: E*=+0.40 -> realized D=0.0, room stalled 0.9 K under
     // target). Nearest caps the law's D error at +/-0.25 K (bias-free); the
     // plain/fallback paths below keep floor() to stay byte-compatible with
     // upstream. The overshoot latch sinks `desired` upstream of E*.
-    gap_ss = HEAT_GAP_WARM;
-    e_star = desired - this->room_temperature_ + gap_ss - HEAT_LEAD;
+    e_star = (desired - this->room_temperature_) / 2.0f;
     e_star = std::min(HEAT_E_MAX, std::max(HEAT_E_MIN, e_star));
     wire = std::roundf((this->intake_temperature_ + e_star) * 2.0f) / 2.0f;
-  } else {
-    // Legacy law (cool / heat-cool / boost not yet known): full proportional
-    // on the raw error - 2026-10-20: the earlier (desired - room)/2 half-step
-    // left too much deadband and produced over/undershoot.
-    wire = this->intake_temperature_ + (desired - this->room_temperature_);
-    // Never let the unit thermostat-off: the service manual turns the
-    // compressor off when intake - b13 > +2.0 K (3-min restart below), so
-    // b13 >= intake - 1 holds D <= +1, a full K below OFF.
-    wire = std::min(30.0f, std::max(wire, std::max(this->intake_temperature_ - 1.0f, 16.0f)));
-    wire = std::floor(wire * 2.0f) / 2.0f;
-
-    // No boost compensation (removed 2026-10-29): the colder it gets outside,
-    // the larger the byte-derived B - and cancelling half of it made the units
-    // undershoot MORE (realized room-setpoint gap grew with B). The unit's own
-    // boost behavior stays untouched; the law steers intake alone.
   }
   wire = std::min(30.0f, std::max(wire, 16.0f));
 
@@ -328,21 +302,16 @@ float PanasonicAC::compute_wire_setpoint() {
                   "(state=0x%02X D=%.1f pw=%.0fW)",
              desired, this->current_temperature_offset_, wire, this->last_state_byte_,
              this->last_reported_gap_, this->last_power_w_);
-  } else if (law_heat) {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f -> wire=%.1f "
-                  "(gap_ss=%.2f E*=%.2f state=0x%02X D=%.1f pw=%.0fW)",
-             desired, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
-             wire, gap_ss, e_star, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
   } else if (std::isnan(this->internal_boost_)) {
     ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f "
-                  "(state=0x%02X D=%.1f pw=%.0fW)",
-             desired, this->room_temperature_, this->intake_temperature_, wire, this->last_state_byte_,
-             this->last_reported_gap_, this->last_power_w_);
+                  "(E*=%.2f state=0x%02X D=%.1f pw=%.0fW)",
+             desired, this->room_temperature_, this->intake_temperature_, wire,
+             e_star, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
   } else {
     ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f -> wire=%.1f "
-                  "(state=0x%02X D=%.1f pw=%.0fW)",
+                  "(E*=%.2f state=0x%02X D=%.1f pw=%.0fW)",
              desired, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
-             wire, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
+             wire, e_star, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
   }
   return wire;
 }

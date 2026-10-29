@@ -31,17 +31,14 @@ static const uint8_t TEMPERATURE_THRESHOLD =
 static const uint32_t GRACE_MS = 6000;      // Grace after our own command masking echoes/stale state (1 poll + slack)
 static const float SETPOINT_EPSILON = 0.25f;  // Echo/adopt tolerance; half a 0.5 step, absorbs only float noise
 
-// v7 cruise heat law (2026-10-22 fixed-wire D-threshold experiment, wohnzimmer):
+// v7 cruise law (2026-10-22 fixed-wire D-threshold experiment, wohnzimmer):
 // thermostat OFF when realized D = intake - b13 crosses ~+0.5..+1.0 (drifty:
 // observed 0.0 / 0.5 / 1.0 across three sweeps), restart when D falls to
 // ~0.0 (started 11 s into a hold at D=0). The > +2.0 K marker from the
 // service manual is NOT the real stop point - stops happen far below it.
-// Cruise target = LEAD (+0.5), just under the stop threshold, holding the
-// unit on with gentle charging inside a ~1 K room band (start ~desired-0.5,
-// stop ~desired..+0.5) - long cycles instead of the v6 flapping, which
-// cruised above the stop threshold (D +0.5..+1.5).
-static const float HEAT_GAP_WARM = 0.0f;     // Standing gap (b13 - intake) at target: 0 -> cruise D = LEAD for any B
-static const float HEAT_LEAD = 0.5f;         // Cruise D = -E* at room == desired; also the overshoot back-off
+// v7.4 (2026-10-29): single path for all modes, E* = halved room-setpoint
+// delta, no LEAD bias. v7.2 removed the boost compensation (units undershoot
+// MORE as B grows when cancelling it).
 static const float HEAT_E_MIN = -2.5f;       // E* floor: D = +2.5 terminal-OFF dive (room >= desired + 2.0)
 static const float HEAT_E_MAX = 2.5f;        // E* cap: D = -2.5 max-heat dive (room <= desired - 3.0)
 // Overshoot latch: set when the unit goes idle while the room is above the
@@ -50,12 +47,6 @@ static const float HEAT_E_MAX = 2.5f;        // E* cap: D = -2.5 max-heat dive (
 // putting b13 far below any restart criterion (D ~ +5..+6) - a hard OFF hold.
 // Cleared when the room dips to (desired - 0.5) or on any user setpoint/mode
 // input (HA or remote).
-
-// Set false to run WITHOUT the compensation law (threshold-experiment builds):
-// the climate target passes straight through to the unit's b3, while the
-// Setpoint calc log line keeps reporting room/intake/boost/wire/state/D/pw
-// so external tooling can still observe and steer the unit.
-static const bool COMPENSATION_ENABLED = true;
 
 enum class CommandType { Normal, Response, Resend };
 
