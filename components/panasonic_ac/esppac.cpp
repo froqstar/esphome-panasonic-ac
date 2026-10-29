@@ -87,7 +87,7 @@ void PanasonicAC::update_current_temperature(int8_t temperature) {
 
   this->intake_temperature_ = temperature;  // RAW intake for the law
 
-  if (!this->compensation_active()) {  // plain mode only (upstream display)
+  if (!this->compensation_active()) {  // plain mode only (uncompensated display)
     temperature += this->current_temperature_offset_;
     this->current_temperature = temperature;
     ESP_LOGV(TAG, "Current temperature incl. offset: %d", temperature);
@@ -168,7 +168,8 @@ climate::ClimateAction PanasonicAC::determine_action() {
   }
 
   // In compensation mode compare raw intake against the wire value we actually
-  // sent (like upstream did vs the biased wire); fall back to display values.
+  // sent (the uncompensated path's comparison, but against the setpoint we
+  // stage instead of the user's display target); fall back to display values.
   float current = this->current_temperature;
   float target = this->target_temperature;
   if (this->compensation_active() && !std::isnan(this->intake_temperature_) &&
@@ -252,7 +253,7 @@ float PanasonicAC::compute_wire_setpoint() {
   float wire;
   float e_star = NAN;  // law intermediate (logged)
   if (!law_valid) {
-    // Fallback = plain-mode / upstream logic. The default path must
+    // Fallback = plain, uncompensated logic. The default path must
     // byte-match what a non-compensating setup sends.
     wire = std::floor((desired - this->current_temperature_offset_) / TEMPERATURE_STEP) * TEMPERATURE_STEP;
   } else {
@@ -263,7 +264,7 @@ float PanasonicAC::compute_wire_setpoint() {
     // thermostat thresholds. Nearest-grid quantization keeps the commanded
     // temperature error unbiased (floor() ate up to 0.4 K of commanded heat
     // and stalled the room under target). The fallback path above keeps
-    // floor() to stay byte-compatible with upstream.
+    // floor() to stay byte-compatible with the uncompensated behavior.
     float delta = desired - this->room_temperature_;
     e_star = delta / 2.0f;  // dampening factor: half the delta
     e_star = std::min(E_CLAMP_MAX, std::max(E_CLAMP_MIN, e_star));

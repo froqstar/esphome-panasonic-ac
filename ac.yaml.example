@@ -67,5 +67,5 @@ climate:
     # external-sensor setpoint control: the sensor provides the displayed room
     # temperature AND drives setpoint compensation (wire setpoint computed from
     # the HA target, the room sensor and the unit's intake temperature).
-    # Omit for plain upstream behavior.
+    # Omit to keep the default, uncompensated setpoint behavior.
     # current_temperature_sensor: temperature_sensor_id

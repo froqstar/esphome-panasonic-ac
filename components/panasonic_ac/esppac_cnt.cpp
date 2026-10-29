@@ -372,7 +372,7 @@ void PanasonicACCNT::set_data(bool set) {
     // Also set current and outside temperature
     // 128 means not supported
     // Intake is always processed (raw stored for the law); display follows
-    // upstream rules only in plain mode (inside update_current_temperature).
+    // plain-mode rules only in plain mode (inside update_current_temperature).
     if (this->rx_buffer_.size() >= 22) {
       if (this->rx_buffer_[18] != 0x80)
         this->update_current_temperature((int8_t) this->rx_buffer_[18]);
@@ -405,12 +405,13 @@ void PanasonicACCNT::set_data(bool set) {
     // shift, powerful, mode shifts), raw x0.5 like target byte 3. Boost
     // B = (b13 - b3)/2; 0 when OFF (b13 == b3 by design). Both are control
     // fields (never the 0x80 sensor sentinel) - guard anyway. Internal only;
-    // consumed by the Setpoint calc log for debugging.
+    // consumed by the Setpoint calc log for debugging. The raw target is the
+    // same byte already parsed above as data[1] (== rx_buffer_[3]).
     if (this->rx_buffer_.size() >= 14) {
-      uint8_t raw_target = this->rx_buffer_[3];
       uint8_t raw_internal = this->rx_buffer_[13];
-      if (raw_target != 0x80 && raw_internal != 0x80) {
-        this->internal_boost_ = ((float) raw_internal - (float) raw_target) * TEMPERATURE_STEP;
+      if (this->data[1] != 0x80 && raw_internal != 0x80) {
+        this->internal_boost_ =
+            ((float) raw_internal - (float) this->data[1]) * TEMPERATURE_STEP;
       }
     }
 
@@ -614,8 +615,7 @@ void PanasonicACCNT::sync_compensation() {
   if (this->state_ != ACState::Ready)
     return;
   // Grace gate: our own staged command may not have echoed yet; the data
-  // snapshot it would rebuild from could still be pre-command (deviation from
-  // the YAML, which only gated adoption).
+  // snapshot it would rebuild from could still be pre-command.
   if (this->has_sent_command_ && millis() - this->last_command_time_ < GRACE_MS)
     return;
   if (std::isnan(this->desired_setpoint_))
