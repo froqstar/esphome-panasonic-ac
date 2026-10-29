@@ -250,7 +250,7 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
     // Store the HA (display) setpoint; fold the computed wire value into this
     // same staged frame so a mode+temp call never needs a second frame.
     if (call.get_target_temperature().has_value()) {
-      float t = std::min(30.0f, std::max(*call.get_target_temperature(), 16.0f));
+      float t = clamp_setpoint_temperature(*call.get_target_temperature());
       this->desired_setpoint_ = t;  // display units (HA target)
       this->save_desired_setpoint(t);
       ESP_LOGV(TAG, "Stored desired setpoint %.1f", t);
@@ -262,10 +262,9 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
         call.get_mode().has_value() ? *call.get_mode() : this->mode;
     if (effective_mode != climate::CLIMATE_MODE_OFF &&
         effective_mode != climate::CLIMATE_MODE_FAN_ONLY) {
-      float wire = this->compute_wire_setpoint();  // law (+boost cancel) or plain fallback
+      float wire = this->compute_wire_setpoint();  // law or plain fallback
       if (!std::isnan(wire)) {
-        this->cmd[1] = (uint8_t)(wire / TEMPERATURE_STEP);  // wire already final
-        this->last_sent_setpoint_ = wire;
+        this->stage_wire_setpoint(wire);
         ESP_LOGV(TAG, "Compensated wire setpoint %.1f staged", wire);
       }
     }
@@ -405,31 +404,24 @@ void PanasonicACCNT::set_data(bool set) {
     // Byte 13 = unit's internal setpoint after its own boosts (outside-temp
     // shift, powerful, mode shifts), raw x0.5 like target byte 3. Boost
     // B = (b13 - b3)/2; 0 when OFF (b13 == b3 by design). Both are control
-    // fields (never the 0x80 sensor sentinel) - guard anyway. Stored to the
-    // member unconditionally (consumed by the compensation law); the sensor
-    // publish is a no-op when no internal_boost: sensor is attached.
+    // fields (never the 0x80 sensor sentinel) - guard anyway. Internal only;
+    // consumed by the Setpoint calc log for debugging.
     if (this->rx_buffer_.size() >= 14) {
       uint8_t raw_target = this->rx_buffer_[3];
       uint8_t raw_internal = this->rx_buffer_[13];
       if (raw_target != 0x80 && raw_internal != 0x80) {
-        this->internal_boost_ = ((float) raw_internal - (float) raw_target) * 0.5f;
-        this->update_internal_boost(this->internal_boost_);  // publishes only if sensor attached
-        if (!std::isnan(this->intake_temperature_))
-          this->last_reported_gap_ = this->intake_temperature_ - (float) raw_internal * 0.5f;  // D = intake - b13
+        this->internal_boost_ = ((float) raw_internal - (float) raw_target) * TEMPERATURE_STEP;
       }
     }
 
-    // Diagnostics for the Setpoint calc log: operating state (frame byte 12,
-    // observed 0x4C running / 0x40 idle) and instantaneous power (bytes 28-30).
+    // Operating state (frame byte 12, observed 0x4C running / 0x40 idle).
+    // The idle edge sets the overshoot latch if the room is over targeted.
     if (this->rx_buffer_.size() >= 13) {
       uint8_t state = this->rx_buffer_[12];
       if (state == 0x40 && this->last_state_byte_ != 0x40)
-        this->note_unit_idle();  // idle transition: latch overshoot if room over desired
+        this->note_unit_idle();
       this->last_state_byte_ = state;
     }
-    if (this->rx_buffer_.size() >= 31)
-      this->last_power_w_ = (float) determine_power_consumption(
-          (int8_t) this->rx_buffer_[28], (int8_t) this->rx_buffer_[29], (int8_t) this->rx_buffer_[30]);
 
     if (this->defrost_sensor_ != nullptr) {
       if (this->rx_buffer_.size() >= 15) {
@@ -613,7 +605,7 @@ void PanasonicACCNT::handle_reported_setpoint(uint8_t raw) {
   if (!std::isnan(this->desired_setpoint_))
     this->target_temperature = this->desired_setpoint_;  // publish shows desired
 
-  this->sync_compensation();  // reads THIS poll's intake + boost
+  this->sync_compensation();  // recompute on this poll's fresh intake
 }
 
 void PanasonicACCNT::sync_compensation() {
@@ -631,7 +623,7 @@ void PanasonicACCNT::sync_compensation() {
   if (this->mode == climate::CLIMATE_MODE_OFF || this->mode == climate::CLIMATE_MODE_FAN_ONLY)
     return;  // no setpoint staging while off/fan
 
-  float wire = this->compute_wire_setpoint();  // law (+boost cancel) or plain fallback
+  float wire = this->compute_wire_setpoint();  // law or plain fallback
   if (std::isnan(wire))
     return;
 
@@ -642,15 +634,19 @@ void PanasonicACCNT::sync_compensation() {
     return;
   }
 
+  this->stage_wire_setpoint(wire);
+  this->last_command_time_ = millis();
+  this->has_sent_command_ = true;
+  ESP_LOGD(TAG, "Staged compensated wire setpoint %.1f", wire);
+}
+
+void PanasonicACCNT::stage_wire_setpoint(float wire) {
   if (this->cmd.empty()) {
     ESP_LOGV(TAG, "Copying data to cmd");
     this->cmd = this->data;
   }
   this->cmd[1] = (uint8_t)(wire / TEMPERATURE_STEP);  // wire already final
   this->last_sent_setpoint_ = wire;
-  this->last_command_time_ = millis();
-  this->has_sent_command_ = true;
-  ESP_LOGD(TAG, "Staged compensated wire setpoint %.1f", wire);
 }
 
 void PanasonicACCNT::on_room_change() {

@@ -25,7 +25,7 @@ uart:
   parity: EVEN
 
 # Builds against this checkout's components/ directory (this fork carries
-# keys the upstream repo does not have, e.g. internal_boost below)
+# keys the upstream repo does not have)
 external_components:
   source:
     type: local
@@ -63,10 +63,6 @@ climate:
     # current_power_consumption:
     #   name: Panasonic AC Power Consumption
 
-    # CN-CNT (CZ-TACG1) only - unit's hidden internal setpoint boost (b13-b3)/2
-    # internal_boost:
-    #   name: Panasonic AC Internal Boost
-
     # Adapt according to your measurements
     # current_temperature_offset: 0
     # outside_temperature_offset: 0
@@ -74,6 +70,6 @@ climate:
     # CN-CNT (CZ-TACG1) only. Setting this switches the unit into
     # external-sensor setpoint control: the sensor provides the displayed room
     # temperature AND drives setpoint compensation (wire setpoint computed from
-    # the HA target, the room sensor and the unit's intake temperature, with
-    # the unit's internal boost cancelled). Omit for plain upstream behavior.
+    # the HA target, the room sensor and the unit's intake temperature).
+    # Omit for plain upstream behavior.
     # current_temperature_sensor: temperature_sensor_id

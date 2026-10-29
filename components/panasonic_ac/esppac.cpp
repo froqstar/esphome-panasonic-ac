@@ -195,13 +195,6 @@ void PanasonicAC::update_current_power_consumption(int16_t power) {
   }
 }
 
-void PanasonicAC::update_internal_boost(float boost) {
-  ESP_LOGV(TAG, "Received internal boost %.1f", boost);
-  if (this->internal_boost_sensor_ != nullptr && this->internal_boost_sensor_->state != boost) {
-    this->internal_boost_sensor_->publish_state(boost);  // Publish on change only
-  }
-}
-
 void PanasonicAC::update_defrost(bool defrost) {
   if (this->defrost_sensor_ != nullptr) {
     this->defrost_sensor_->publish_state(defrost);
@@ -236,30 +229,24 @@ float PanasonicAC::compute_wire_setpoint() {
 
   // Effective desired: the overshoot latch hard-holds the unit OFF by pinning
   // the wire at the unit's minimum (16) - the law is bypassed so no clamp can
-  // lift the wire back up (a mere desired-sink saturates at E_MIN and still
-  // allows D=+2.5 cruise margins). Cleared when the room gives back 0.5 K or
-  // the user intervenes.
+  // lift the wire back up (a mere desired-sink saturates at E_CLAMP_MIN and
+  // still allows D=+2.5 cruise margins). Cleared when the room gives back
+  // 0.5 K or the user intervenes.
   float desired = this->desired_setpoint_;
   if (this->overshoot_) {
     if (!std::isnan(this->room_temperature_) &&
-        this->room_temperature_ <= desired - 0.5f) {
+        this->room_temperature_ <= desired - TEMPERATURE_STEP) {
       this->overshoot_ = false;
       ESP_LOGI(TAG, "Overshoot latch cleared: room dipped to %.1f (desired %.1f)",
                this->room_temperature_, desired);
     } else {
       // Room sensor stale -> latch stays (conservative: hold off).
-      float wire = 16.0f;  // unit minimum; b13 = 16 + B stays far below intake
-      ESP_LOGD(TAG, "Setpoint calc (overshoot hold): desired=%.1f room=%.1f intake=%.1f -> wire=%.1f "
-                    "(state=0x%02X D=%.1f pw=%.0fW)",
-               desired, this->room_temperature_, this->intake_temperature_,
-               wire, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
+      float wire = (float) MIN_TEMPERATURE;  // unit minimum; b13 = 16 + B stays far below intake
+      ESP_LOGD(TAG, "Setpoint calc (overshoot hold): desired=%.1f room=%.1f -> wire=%.1f (state=0x%02X)",
+               desired, this->room_temperature_, wire, this->last_state_byte_);
       return wire;
     }
   }
-
-  // DELTA_SHIFT 2026-10-29: the room-setpoint delta is HALVED in the law - the
-  // units were "too aggressive" at full proportional. LEAD is dropped (no bias;
-  // the unit cruises right at the target instead of ~0.5 K under it).
 
   bool law_valid = !std::isnan(this->room_temperature_) && !std::isnan(this->intake_temperature_);
   float wire;
@@ -267,52 +254,27 @@ float PanasonicAC::compute_wire_setpoint() {
   if (!law_valid) {
     // Fallback = plain-mode / upstream logic. The default path must
     // byte-match what a non-compensating setup sends.
-    wire = std::floor((desired - this->current_temperature_offset_) * 2.0f) / 2.0f;
+    wire = std::floor((desired - this->current_temperature_offset_) / TEMPERATURE_STEP) * TEMPERATURE_STEP;
   } else {
-    // v7.4 cruise law - single path for all modes (cool-cool / heat-cool merged
-    // 2026-10-29, was HEAT-only before): with the halved delta the former
-    // legacy branch reduced to the same math anyway; the heat law's shape was
-    // adopted for cooling too (symmetric +-2.5 K E* dive clamp instead of the
-    // unbounded 30 C cap + intake-1 floor, nearest-grid instead of floor()
-    // quantization).
-    // E* = clamp((desired - room) / 2, -2.5, +2.5); b13 = intake + E*.
-    // Half the room-setpoint delta (DELTA_SHIFT 2026-10-29), no LEAD bias.
-    // NO boost compensation (removed 2026-10-29): the colder it gets outside,
-    // the larger the byte-derived B - and cancelling it made the units
-    // undershoot MORE (realized room-setpoint gap grew with B). The unit's own
-    // boost behavior stays untouched; the law steers intake alone.
-    // Nearest-grid quantization (v7.1): floor() ate up to 0.4 K of commanded
-    // heat (field: E*=+0.40 -> realized D=0.0, room stalled 0.9 K under
-    // target). Nearest caps the law's D error at +/-0.25 K (bias-free); the
-    // plain/fallback paths below keep floor() to stay byte-compatible with
-    // upstream. The overshoot latch sinks `desired` upstream of E*.
-    e_star = (desired - this->room_temperature_) / 2.0f;
-    e_star = std::min(HEAT_E_MAX, std::max(HEAT_E_MIN, e_star));
-    wire = std::roundf((this->intake_temperature_ + e_star) * 2.0f) / 2.0f;
+    // Dampened proportional law for all modes: react with HALF the room-
+    // setpoint delta. E* = (desired - room) / 2 (explicit dampening: never
+    // express this as * 0.5), clamped to E_CLAMP_MIN/MAX, then
+    // b13 = intake + E*. The clamps bound the dive/off band to the measured
+    // thermostat thresholds. Nearest-grid quantization keeps the commanded
+    // temperature error unbiased (floor() ate up to 0.4 K of commanded heat
+    // and stalled the room under target). The fallback path above keeps
+    // floor() to stay byte-compatible with upstream.
+    float delta = desired - this->room_temperature_;
+    e_star = delta / 2.0f;  // dampening factor: half the delta
+    e_star = std::min(E_CLAMP_MAX, std::max(E_CLAMP_MIN, e_star));
+    wire = std::roundf((this->intake_temperature_ + e_star) / TEMPERATURE_STEP) * TEMPERATURE_STEP;
   }
-  wire = std::min(30.0f, std::max(wire, 16.0f));
+  wire = clamp_setpoint_temperature(wire);
 
-  // Log every calculation with its inputs (desired = effective staged value,
-  // i.e. pinned to the 16 hold while the overshoot latch is active; room raw sensor; intake
-  // raw packet; boost (b13-b3)/2; wire = actual byte) plus last-poll
-  // diagnostics: operating state byte, realized thermostat gap D = intake -
-  // b13, instantaneous power.
-  if (!law_valid) {
-    ESP_LOGD(TAG, "Setpoint calc (fallback, sensors stale): desired=%.1f offset=%d -> wire=%.1f "
-                  "(state=0x%02X D=%.1f pw=%.0fW)",
-             desired, this->current_temperature_offset_, wire, this->last_state_byte_,
-             this->last_reported_gap_, this->last_power_w_);
-  } else if (std::isnan(this->internal_boost_)) {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f "
-                  "(E*=%.2f state=0x%02X D=%.1f pw=%.0fW)",
-             desired, this->room_temperature_, this->intake_temperature_, wire,
-             e_star, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
-  } else {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f -> wire=%.1f "
-                  "(E*=%.2f state=0x%02X D=%.1f pw=%.0fW)",
-             desired, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
-             wire, e_star, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
-  }
+  ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f -> wire=%.1f "
+                "(E*=%.2f state=0x%02X)",
+           desired, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
+           wire, e_star, this->last_state_byte_);
   return wire;
 }
 
@@ -430,10 +392,6 @@ void PanasonicAC::set_mild_dry_switch(switch_::Switch *mild_dry_switch) {
 
 void PanasonicAC::set_current_power_consumption_sensor(sensor::Sensor *current_power_consumption_sensor) {
   this->current_power_consumption_sensor_ = current_power_consumption_sensor;
-}
-
-void PanasonicAC::set_internal_boost_sensor(sensor::Sensor *internal_boost_sensor) {
-  this->internal_boost_sensor_ = internal_boost_sensor;
 }
 
 void PanasonicAC::set_defrost_sensor(binary_sensor::BinarySensor *defrost_sensor) {

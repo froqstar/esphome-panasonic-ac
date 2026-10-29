@@ -44,8 +44,9 @@ class PanasonicACCNT : public PanasonicAC {
 
   void set_data(bool set);
 
-  void handle_reported_setpoint(uint8_t raw);  // Adoption + sync after each poll (compensation mode)
-  void sync_compensation();                    // Recompute and stage the compensated wire setpoint
+  void handle_reported_setpoint(uint8_t raw);   // Adoption + sync after each poll (compensation mode)
+  void sync_compensation();                     // Recompute and stage the compensated wire setpoint
+  void stage_wire_setpoint(float wire);         // Fold a final wire value into the next staged command
 
   void send_command(std::vector<uint8_t> command, CommandType type, uint8_t header);
   void send_packet(const std::vector<uint8_t> &command, CommandType type);

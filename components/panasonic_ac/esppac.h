@@ -28,25 +28,27 @@ static const float TEMPERATURE_TOLERANCE = 2;  // The tolerance to allow when ch
 static const uint8_t TEMPERATURE_THRESHOLD =
     100;  // Maximum temperature the AC can report before considering the temperature as invalid
 
-static const uint32_t GRACE_MS = 6000;      // Grace after our own command masking echoes/stale state (1 poll + slack)
-static const float SETPOINT_EPSILON = 0.25f;  // Echo/adopt tolerance; half a 0.5 step, absorbs only float noise
+static const uint32_t GRACE_MS = 6000;                     // Grace after our own command masking echoes/stale state (1 poll + slack)
+static const float SETPOINT_EPSILON = TEMPERATURE_STEP / 2.0f;  // Echo/adopt tolerance; half a 0.5 K step, absorbs only float noise
 
-// v7 cruise law (2026-10-22 fixed-wire D-threshold experiment, wohnzimmer):
-// thermostat OFF when realized D = intake - b13 crosses ~+0.5..+1.0 (drifty:
-// observed 0.0 / 0.5 / 1.0 across three sweeps), restart when D falls to
-// ~0.0 (started 11 s into a hold at D=0). The > +2.0 K marker from the
-// service manual is NOT the real stop point - stops happen far below it.
-// v7.4 (2026-10-29): single path for all modes, E* = halved room-setpoint
-// delta, no LEAD bias. v7.2 removed the boost compensation (units undershoot
-// MORE as B grows when cancelling it).
-static const float HEAT_E_MIN = -2.5f;       // E* floor: D = +2.5 terminal-OFF dive (room >= desired + 2.0)
-static const float HEAT_E_MAX = 2.5f;        // E* cap: D = -2.5 max-heat dive (room <= desired - 3.0)
+// Setpoint compensation law (field-tuned on CZ-TACG1 units, 2026-10): the
+// unit's thermostat stops at realized D = intake - b13 of ~0.5..1.0 K (the
+// service manual's > +2.0 K marker is NOT the real stop point; restart is
+// ~0.0). The law therefore commands E* = clamp((desired - room) / 2,
+// E_CLAMP_MIN, E_CLAMP_MAX) and writes b13 = intake + E*: the unit keeps its
+// own boost behavior (offsetting it measurably increased undershoot).
+static const float E_CLAMP_MIN = -2.5f;  // E* floor: D = +2.5 terminal-OFF dive
+static const float E_CLAMP_MAX = 2.5f;   // E* cap: D = -2.5 max-drive dive
 // Overshoot latch: set when the unit goes idle while the room is above the
 // desired setpoint (it heated past the user's target). While latched the law
 // is bypassed and the wire is pinned at 16 (the lowest the unit accepts),
-// putting b13 far below any restart criterion (D ~ +5..+6) - a hard OFF hold.
-// Cleared when the room dips to (desired - 0.5) or on any user setpoint/mode
-// input (HA or remote).
+// putting b13 far below any restart criterion - a hard OFF hold. Cleared when
+// the room dips to (desired - 0.5) or on any user setpoint/mode input (HA or
+// remote).
+
+inline float clamp_setpoint_temperature(float temperature) {
+  return std::min((float) MAX_TEMPERATURE, std::max((float) MIN_TEMPERATURE, temperature));
+}
 
 enum class CommandType { Normal, Response, Resend };
 
@@ -66,7 +68,6 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   void set_econavi_switch(switch_::Switch *econavi_switch);
   void set_mild_dry_switch(switch_::Switch *mild_dry_switch);
   void set_current_power_consumption_sensor(sensor::Sensor *current_power_consumption_sensor);
-  void set_internal_boost_sensor(sensor::Sensor *internal_boost_sensor);
   void set_defrost_sensor(binary_sensor::BinarySensor *defrost_sensor);
 
   void set_current_temperature_sensor(sensor::Sensor *current_temperature_sensor);
@@ -85,7 +86,6 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   switch_::Switch *mild_dry_switch_ = nullptr;                  // Switch to toggle mild dry mode on/off
   sensor::Sensor *current_temperature_sensor_ = nullptr;        // Sensor to use for current temperature where AC does not report
   sensor::Sensor *current_power_consumption_sensor_ = nullptr;  // Sensor to store current power consumption from queries
-  sensor::Sensor *internal_boost_sensor_ = nullptr;  // Unit's internal setpoint boost (b13-b3)/2
   binary_sensor::BinarySensor *defrost_sensor_ = nullptr;       // Sensor to store defrost status
 
   size_t vertical_swing_state_;
@@ -101,18 +101,16 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   // External-sensor setpoint compensation state (active iff current_temperature_sensor_ != nullptr)
   float room_temperature_ = NAN;           // Raw room sensor state (no offset) for the law
   float intake_temperature_ = NAN;         // Raw packet intake temperature for the law
-  float internal_boost_ = NAN;             // Measured boost B = (b13 - b3)/2, always populated each poll
+  float internal_boost_ = NAN;             // Measured boost B = (b13 - b3)/2, internal for the Setpoint calc log only
   float desired_setpoint_ = NAN;           // User/HA setpoint in display units (persisted)
   bool overshoot_ = false;                 // Heat over-target latch (wire pinned at 16 while set)
-  float last_sent_setpoint_ = NAN;         // Wire value we last staged (post-cancellation, actual byte)
+  float last_sent_setpoint_ = NAN;         // Wire value we last staged (actual byte)
   uint32_t last_command_time_ = 0;         // Grace anchor; 0 until first staged command
   bool has_sent_command_ = false;          // Boot guard: unit's retained setpoint not treated as user input
   ESPPreferenceObject desired_setpoint_pref_;  // Persist desired_setpoint_ across reboots
 
-  // Last-poll diagnostics (CNT) appended to the Setpoint calc log
-  uint8_t last_state_byte_ = 0;    // Frame byte 12: observed 0x4C running / 0x40 idle (kinderzimmer)
-  float last_reported_gap_ = NAN;  // D = intake - b13 from this poll's frame (thermostat input)
-  float last_power_w_ = NAN;       // Instantaneous power, bytes 28-30
+  // Last-poll unit state (CNT): 0x40 idle edge drives the overshoot latch
+  uint8_t last_state_byte_ = 0;    // Frame byte 12: observed 0x4C running / 0x40 idle
 
   bool waiting_for_response_ = false;  // Set to true if we are waiting for a response
 
@@ -140,12 +138,11 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   void update_econavi(bool econavi);
   void update_mild_dry(bool mild_dry);
   void update_current_power_consumption(int16_t power);
-  void update_internal_boost(float boost);
   void update_defrost(bool defrost);
 
   // Compensation helpers (CNT uses these; WLAN never activates compensation)
   bool compensation_active() const { return this->current_temperature_sensor_ != nullptr; }
-  float compute_wire_setpoint();  // Law (+boost cancel) or plain fallback; wire space, NAN if desired unknown
+  float compute_wire_setpoint();  // Law or plain fallback; wire space, NAN if desired unknown
   void note_unit_idle();   // Idle transition (CNT): latch overshoot when room over desired
   void note_user_change();  // User setpoint/mode input (HA or remote): clear the overshoot latch
   void maybe_restore_desired_setpoint();

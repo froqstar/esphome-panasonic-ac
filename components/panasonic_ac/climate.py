@@ -40,7 +40,6 @@ CONF_ECO_SWITCH = "eco_switch"
 CONF_ECONAVI_SWITCH = "econavi_switch"
 CONF_MILD_DRY_SWITCH = "mild_dry_switch"
 CONF_CURRENT_POWER_CONSUMPTION = "current_power_consumption"
-CONF_INTERNAL_BOOST = "internal_boost"
 CONF_DEFROST_SENSOR = "defrost_sensor"
 CONF_WLAN = "wlan"
 CONF_CNT = "cnt"
@@ -77,12 +76,6 @@ PANASONIC_CNT_SCHEMA = {
         unit_of_measurement=UNIT_WATT,
         accuracy_decimals=0,
         device_class=DEVICE_CLASS_POWER,
-        state_class=STATE_CLASS_MEASUREMENT,
-    ),
-    cv.Optional(CONF_INTERNAL_BOOST): sensor.sensor_schema(
-        unit_of_measurement=UNIT_CELSIUS,
-        accuracy_decimals=1,  # B lives on the 0.5 C grid
-        device_class=DEVICE_CLASS_TEMPERATURE,
         state_class=STATE_CLASS_MEASUREMENT,
     ),
 }
@@ -140,7 +133,3 @@ async def to_code(config):
     if CONF_CURRENT_POWER_CONSUMPTION in config:
         sens = await sensor.new_sensor(config[CONF_CURRENT_POWER_CONSUMPTION])
         cg.add(var.set_current_power_consumption_sensor(sens))
-
-    if CONF_INTERNAL_BOOST in config:
-        sens = await sensor.new_sensor(config[CONF_INTERNAL_BOOST])
-        cg.add(var.set_internal_boost_sensor(sens))
