@@ -280,10 +280,13 @@ float PanasonicAC::compute_wire_setpoint() {
     // non-compensating setup sends.
     wire = std::floor((desired - this->current_temperature_offset_) * 2.0f) / 2.0f;
   } else if (law_heat) {
-    // v7 cruise law (HEAT only until cooling has field data).
-    // E* = clamp(desired - room + gap_ss - LEAD, -2.5, +2.5); b13 = intake + E*;
-    // wire cancels the FULL boost so realized b13 tracks E* through B transients.
-    // gap_ss = 0 (GAP_WARM): realized D = -E* = room - desired + LEAD, so the
+    // v7.2 cruise law (HEAT only until cooling has field data).
+    // E* = clamp(desired - room + gap_ss - LEAD, -2.5, +2.5); b13 = intake + E*.
+    // NO boost compensation (removed 2026-10-29): the colder it gets outside,
+    // the larger the byte-derived B - and cancelling it made the units
+    // undershoot MORE (realized room-setpoint gap grew with B). The unit's own
+    // boost behavior stays untouched; the law steers intake alone.
+    // gap_ss = 0 (GAP_WARM): realized D = room - desired + LEAD, so the
     // running unit cruises at D = +0.5 while room approaches desired - just
     // under the measured stop threshold (~+0.5..+1.0) - and crosses 0 /
     // restart once room falls ~0.5 K below the target. Starts too deep
@@ -293,11 +296,10 @@ float PanasonicAC::compute_wire_setpoint() {
     // target). Nearest caps the law's D error at +/-0.25 K (bias-free); the
     // plain/fallback paths below keep floor() to stay byte-compatible with
     // upstream. The overshoot latch sinks `desired` upstream of E*.
-    float boost = std::min(HEAT_BOOST_SCALE, std::max(0.0f, this->internal_boost_));
-    gap_ss = HEAT_GAP_WARM * (1.0f - boost / HEAT_BOOST_SCALE);
+    gap_ss = HEAT_GAP_WARM;
     e_star = desired - this->room_temperature_ + gap_ss - HEAT_LEAD;
     e_star = std::min(HEAT_E_MAX, std::max(HEAT_E_MIN, e_star));
-    wire = std::roundf((this->intake_temperature_ + e_star - this->internal_boost_) * 2.0f) / 2.0f;
+    wire = std::roundf((this->intake_temperature_ + e_star) * 2.0f) / 2.0f;
   } else {
     // Legacy law (cool / heat-cool / boost not yet known): full proportional
     // on the raw error - 2026-10-20: the earlier (desired - room)/2 half-step
@@ -305,25 +307,14 @@ float PanasonicAC::compute_wire_setpoint() {
     wire = this->intake_temperature_ + (desired - this->room_temperature_);
     // Never let the unit thermostat-off: the service manual turns the
     // compressor off when intake - b13 > +2.0 K (3-min restart below), so
-    // b13 >= intake - 1 holds D <= +1, a full K below OFF. Floor applies to
-    // the INTENDED value - the boost subtraction below shifts realized b13
-    // back up, making D even smaller.
+    // b13 >= intake - 1 holds D <= +1, a full K below OFF.
     wire = std::min(30.0f, std::max(wire, std::max(this->intake_temperature_ - 1.0f, 16.0f)));
     wire = std::floor(wire * 2.0f) / 2.0f;
 
-    // Feedforward-cancel half the unit's internal boost: the compressor tracks
-    // b13 = b3 + B, so the unit settles intake B degrees above whatever we
-    // put in b3.
-    // RESOLVED 2026-10-20 (live, kinderzimmer): the unit's REALIZED boost
-    // deviates from the byte-derived B - pure B cancellation made the room
-    // undershoot. Cancel HALF of B instead: a linear scale rather than a
-    // fixed offset (a constant BOOST_BASELINE=0.5 correction was fitted at
-    // B=1.0; B/2 gives the identical result there while generalizing to
-    // other B). The internal_boost member and its sensor keep the true B.
-    if (!std::isnan(this->internal_boost_)) {
-      wire -= this->internal_boost_ / 2.0f;
-      wire = std::floor(wire * 2.0f) / 2.0f;  // B/2 can land off-grid (0.25 steps); floor re-grids for exact write-skip/echo
-    }
+    // No boost compensation (removed 2026-10-29): the colder it gets outside,
+    // the larger the byte-derived B - and cancelling half of it made the units
+    // undershoot MORE (realized room-setpoint gap grew with B). The unit's own
+    // boost behavior stays untouched; the law steers intake alone.
   }
   wire = std::min(30.0f, std::max(wire, 16.0f));
 
@@ -343,16 +334,15 @@ float PanasonicAC::compute_wire_setpoint() {
              desired, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
              wire, gap_ss, e_star, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
   } else if (std::isnan(this->internal_boost_)) {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f (no cancellation yet) "
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=? -> wire=%.1f "
                   "(state=0x%02X D=%.1f pw=%.0fW)",
              desired, this->room_temperature_, this->intake_temperature_, wire, this->last_state_byte_,
              this->last_reported_gap_, this->last_power_w_);
   } else {
-    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f (cancel %.1f = B/2) -> wire=%.1f "
+    ESP_LOGD(TAG, "Setpoint calc: desired=%.1f room=%.1f intake=%.1f boost=%.1f -> wire=%.1f "
                   "(state=0x%02X D=%.1f pw=%.0fW)",
              desired, this->room_temperature_, this->intake_temperature_, this->internal_boost_,
-             this->internal_boost_ / 2.0f, wire, this->last_state_byte_, this->last_reported_gap_,
-             this->last_power_w_);
+             wire, this->last_state_byte_, this->last_reported_gap_, this->last_power_w_);
   }
   return wire;
 }

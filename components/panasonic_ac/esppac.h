@@ -44,7 +44,6 @@ static const float HEAT_GAP_WARM = 0.0f;     // Standing gap (b13 - intake) at t
 static const float HEAT_LEAD = 0.5f;         // Cruise D = -E* at room == desired; also the overshoot back-off
 static const float HEAT_E_MIN = -2.5f;       // E* floor: D = +2.5 terminal-OFF dive (room >= desired + 2.0)
 static const float HEAT_E_MAX = 2.5f;        // E* cap: D = -2.5 max-heat dive (room <= desired - 3.0)
-static const float HEAT_BOOST_SCALE = 4.0f;  // B clamp used by the law (schedule no longer used)
 // Overshoot latch: set when the unit goes idle while the room is above the
 // desired setpoint (it heated past the user's target). While latched the law
 // is bypassed and the wire is pinned at 16 (the lowest the unit accepts),
