@@ -31,12 +31,12 @@ static const uint8_t TEMPERATURE_THRESHOLD =
 static const uint32_t GRACE_MS = 6000;                     // Grace after our own command masking echoes/stale state (1 poll + slack)
 static const float SETPOINT_EPSILON = TEMPERATURE_STEP / 2.0f;  // Echo/adopt tolerance; half a 0.5 K step, absorbs only float noise
 
-// Setpoint compensation law (field-tuned on CZ-TACG1 units, 2026-10): the
-// unit's thermostat stops at realized D = intake - b13 of ~0.5..1.0 K (the
-// service manual's > +2.0 K marker is NOT the real stop point; restart is
-// ~0.0). The law therefore commands E* = clamp((desired - room) / 2,
-// E_CLAMP_MIN, E_CLAMP_MAX) and writes b13 = intake + E*: the unit keeps its
-// own boost behavior (offsetting it measurably increased undershoot).
+// Setpoint compensation law: the unit's thermostat stops at realized
+// D = intake - b13 of ~0.5..1.0 K (the service manual's > +2.0 K marker is
+// NOT the real stop point; restart is ~0.0). The law therefore commands
+// E* = clamp((desired - room) / 2, E_CLAMP_MIN, E_CLAMP_MAX) and writes
+// b13 = intake + E*: the unit keeps its own boost behavior (offsetting it
+// measurably increased undershoot).
 static const float E_CLAMP_MIN = -2.5f;  // E* floor: D = +2.5 terminal-OFF dive
 static const float E_CLAMP_MAX = 2.5f;   // E* cap: D = -2.5 max-drive dive
 // Overshoot latch: set when the unit goes idle while the room is above the

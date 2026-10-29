@@ -24,12 +24,8 @@ uart:
   baud_rate: 9600
   parity: EVEN
 
-# Builds against this checkout's components/ directory (this fork carries
-# keys the upstream repo does not have)
 external_components:
-  source:
-    type: local
-    path: components
+  source: github://DomiStyle/esphome-panasonic-ac
   components: [panasonic_ac]
 
 
